@@ -1,0 +1,54 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+.env.*
+
+# IDEs and editors
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Database files
+*.sqlite3
+
+# Dependency directories
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Python packaging
+pip-wheel-metadata/
+*.whl
+
+# FastAPI / Uvicorn temp files
+*.uvicorn
+
+# Coverage reports
+htmlcov/
+.coverage
+.tox/
+.nox/
+.cache/
+
+# Jupyter notebooks
+.ipynb_checkpoints/
+
+# Secrets (if any)
+secrets.json
