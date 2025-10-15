@@ -1,3 +1,38 @@
 .DS_Store
-.db
-media/
+.env
+.env.*
+*.db
+*.sqlite3
+test.db
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Venvs
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+ffmpeg.log
+worker.log
+
+# Media (generated uploads and transcoded outputs)
+server/app/media/
+
+# Kafka data
+kafka/data/
+
+# Node / misc
+node_modules/
