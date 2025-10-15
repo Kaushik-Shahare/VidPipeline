@@ -5,6 +5,7 @@ from core.database import AsyncSessionLocal
 import logging
 import json
 import os
+import asyncio
 
 logging.basicConfig(filename='worker.log', level=logging.INFO)
 
@@ -65,19 +66,33 @@ async def process_video_message(message):
         }, db)
 
 async def consume_video_processing_message():
-    consumer = AIOKafkaConsumer(
-        kafka_topic,
-        bootstrap_servers=kafka_bootstrap_servers,
-        group_id="video_processor_group",
-        enable_auto_commit=False
-    )
-    await consumer.start()
-    try:
-        async for msg in consumer:
-            logging.info(f"Consumed message: {msg.value.decode('utf-8')}")
-            # Here you can add code to process the video messagek
-            await process_video_message(msg)
-            await consumer.commit()
-    finally:
-        await consumer.stop()
+    """Resilient consumer loop that reconnects on errors and keeps running."""
+    while True:
+        consumer = AIOKafkaConsumer(
+            kafka_topic,
+            bootstrap_servers=kafka_bootstrap_servers,
+            group_id="video_processor_group",
+            enable_auto_commit=True,            # reduce UnknownMemberId/IllegalGeneration churn
+            auto_offset_reset="earliest",
+            heartbeat_interval_ms=3000,
+            session_timeout_ms=10000,
+        )
+        try:
+            logging.info("Starting Kafka consumer...")
+            await consumer.start()
+            async for msg in consumer:
+                try:
+                    logging.info(f"Consumed message: {msg.value.decode('utf-8')}")
+                    await process_video_message(msg)
+                except Exception as e:
+                    logging.exception(f"Failed to process message: {e}")
+        except Exception as e:
+            logging.exception(f"Kafka consumer error, will retry: {e}")
+            # backoff before retrying connection
+            await asyncio.sleep(3)
+        finally:
+            try:
+                await consumer.stop()
+            except Exception:
+                pass
 
