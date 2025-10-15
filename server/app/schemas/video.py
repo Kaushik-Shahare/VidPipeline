@@ -1,16 +1,19 @@
 from pydantic import BaseModel, Field
+from datetime import datetime
 
 class VideoSchema(BaseModel):
     id: int
     video_hash: str
     title: str
-    description: str | None = None
+    description: str | None
     total_chunks: int
     received_chunks: int = 0
     status: str # e.g., 'uploading', 'processing', 'completed'
-    url: str | None = None
-    created_at: str
-    updated_at: str
+    url: str | None
+    hls_url: str | None
+    dash_url: str | None
+    created_at: datetime
+    updated_at: datetime
 
     class Config:
         orm_mode = True

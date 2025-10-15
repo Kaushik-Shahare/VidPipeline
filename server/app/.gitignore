@@ -52,3 +52,7 @@ htmlcov/
 
 # Secrets (if any)
 secrets.json
+
+# Media files
+media/
+test.db

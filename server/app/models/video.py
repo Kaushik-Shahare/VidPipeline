@@ -12,6 +12,8 @@ class Video(Base):
     received_chunks = Column(Integer, default=0, index=False, nullable=False)
     status = Column(String, index=True, nullable=False)  # e.g., 'uploading', 'processing', 'completed'
     url = Column(String, unique=True, index=False, nullable=True)
+    hls_url = Column(String, unique=True, index=False, nullable=True)
+    dash_url = Column(String, unique=True, index=False, nullable=True)
     created_at = Column(DateTime, server_default=func.now(), index=False, nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), index=False, nullable=False)
 

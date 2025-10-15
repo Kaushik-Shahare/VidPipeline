@@ -1,8 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
+import os
 from sqlalchemy.ext.asyncio import AsyncSession
-from crud.video import (get_video_by_hash, create_video)
+from crud.video import (get_video_by_hash, create_video, get_all_videos)
 from schemas.video import VideoSchema, VideoVarientSchema, VideoInitSchema
 from core.database import get_db
+from utils.kafka import send_video_processing_message
 
 router = APIRouter(prefix="/videos", tags=["videos"])
 
@@ -51,8 +53,8 @@ async def upload_video_chunk(video_hash: str, chunk_index: int, chunk_data: Uplo
         raise HTTPException(status_code=400, detail="Invalid chunk index")
 
     # Save to temporary storage (Local filesystem for dev)
-    import os
-    temp_dir = f"media/uploads/{video_hash}/temp"
+    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    temp_dir = os.path.join(base_dir, "media", "uploads", video_hash, "temp")
     os.makedirs(temp_dir, exist_ok=True)
     chunk_path = os.path.join(temp_dir, f"chunk_{chunk_index}")
     with open(chunk_path, "wb") as buffer:
@@ -61,6 +63,10 @@ async def upload_video_chunk(video_hash: str, chunk_index: int, chunk_data: Uplo
     video.received_chunks += 1
     await db.commit()
     await db.refresh(video)
+
+    # forced delay
+    # import asyncio
+    # await asyncio.sleep(1)
 
     return {"message": f"Chunk {chunk_index} uploaded successfully", "video_hash": video_hash, "received_chunks": video.received_chunks}
 
@@ -72,17 +78,16 @@ async def upload_video_finalize(video_hash: str, db: AsyncSession = Depends(get_
         raise HTTPException(status_code=404, detail="Video not found")
 
     # Video already processing or completed
-    if video.status != "uploading":
-        raise HTTPException(status_code=400, detail="Video upload already finalized or in processing")
+    if video.status != "uploading": raise HTTPException(status_code=400, detail="Video upload already finalized or in processing")
 
     # Ensure all chunks have been received
     if video.received_chunks != video.total_chunks:
         raise HTTPException(status_code=400, detail="Not all chunks have been uploaded")
 
     # Merge chunks and process video (Placeholder logic)
-    import os
-    temp_dir = f"media/uploads/{video_hash}/temp"
-    final_video_path = f"media/uploads/{video_hash}/final_video.mp4"
+    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    temp_dir = os.path.join(base_dir, "media", "uploads", video_hash, "temp")
+    final_video_path = os.path.join(base_dir, "media", "uploads", video_hash, "final_video.mp4")
     
     with open(final_video_path, "wb") as final_video_file:
         for i in range(video.total_chunks):
@@ -99,5 +104,14 @@ async def upload_video_finalize(video_hash: str, db: AsyncSession = Depends(get_
     # Delete Temp Chunks with recursive deletion 
     import shutil
     shutil.rmtree(temp_dir)
+
+    # Trigger async processing 
+    await send_video_processing_message(video_hash, final_video_path)
     
     return {"message": "Video upload finalized and processing started", "video_hash": video_hash, "video_url": video.url}
+
+
+@router.get("", response_model=list[VideoSchema])
+async def list_videos(db: AsyncSession = Depends(get_db)):
+    videos = await get_all_videos(db)
+    return videos
