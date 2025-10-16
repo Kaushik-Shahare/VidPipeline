@@ -61,7 +61,7 @@ Setup
 1) Clone
 
 ```bash
-git clone https://github.com/<your-username>/VidPipeline.git
+git clone https://github.com/Kaushik-Shahare/VidPipeline.git
 cd VidPipeline
 ```
 
