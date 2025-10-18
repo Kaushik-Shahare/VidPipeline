@@ -1,5 +1,5 @@
 from aiokafka import AIOKafkaConsumer
-from utils.ffmpeg_util import transcode_to_dash, transcode_to_hls
+from utils.ffmpeg_util import transcode_to_dash, transcode_to_hls, video_thumbnail
 from crud.video import update_video_details
 from core.database import AsyncSessionLocal
 import logging
@@ -41,6 +41,9 @@ async def process_video_message(message):
     dash_path = transcode_to_dash(input_path, output_dir)
     logging.info(f"Transcoding completed for {video_hash}")
 
+    thumbnail_path = video_thumbnail(input_path, output_dir)
+    logging.info(f"Thumbnail Generation Completed for video_hash {video_hash}")
+
     logging.info(f"Updating video status to completed for {video_hash}")
     # Convert filesystem paths to web paths under /media
     app_dir = os.path.abspath(os.path.dirname(__file__))
@@ -57,12 +60,14 @@ async def process_video_message(message):
 
     hls_url = to_web_path(hls_path)
     dash_url = to_web_path(dash_path)
+    thumbnail_url = to_web_path(thumbnail_path)
     async with AsyncSessionLocal() as db:
         await update_video_details(video_hash, {
             "status": "completed",
             "url": hls_url,  # primary playback URL defaults to HLS
             "hls_url": hls_url,
-            "dash_url": dash_url 
+            "dash_url": dash_url,
+            "thumbnail_url": thumbnail_url
         }, db)
 
 async def consume_video_processing_message():

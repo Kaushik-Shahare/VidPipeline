@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile
 import os
 from sqlalchemy.ext.asyncio import AsyncSession
 from crud.video import (get_video_by_hash, create_video, get_all_videos)
-from schemas.video import VideoSchema, VideoVarientSchema, VideoInitSchema
+from schemas.video import VideoSchema, VideoInitSchema
 from core.database import get_db
 from utils.kafka import send_video_processing_message
 

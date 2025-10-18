@@ -5,20 +5,107 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Watch • VidPipeline</title>
     <style>
-      :root{--bg:#0f0f0f;--panel:#181818;--text:#e6e6e6;--muted:#aaaaaa;--border:#2a2a2a}
-      *{box-sizing:border-box}
-      body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:var(--bg);color:var(--text)}
-      .header{display:flex;align-items:center;gap:12px;padding:10px 16px;background:var(--panel);border-bottom:1px solid var(--border)}
-      .logo-badge{width:24px;height:24px;background:#ff3d00;border-radius:6px;display:inline-block}
-      .watch{display:grid;grid-template-columns:1fr 360px;gap:18px;padding:16px}
-      .player{background:#000;border:1px solid var(--border);border-radius:10px;overflow:hidden}
-      .title{font-weight:700;font-size:18px;margin:10px 0}
-      . meta{color:var(--muted);font-size:12px}
-      .panel{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:12px}
-      .stack{display:flex;flex-direction:column;gap:10px}
-      video{width:100%;height:auto;display:block}
-      .pill{display:inline-block;padding:6px 10px;border:1px solid var(--border);border-radius:999px;color:var(--muted);font-size:12px}
-      @media(max-width:1000px){.watch{grid-template-columns:1fr}}
+      :root {
+        --bg: #0f0f0f;
+        --panel: #181818;
+        --text: #e6e6e6;
+        --muted: #aaaaaa;
+        --border: #2a2a2a;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family:
+          system-ui,
+          -apple-system,
+          Segoe UI,
+          Roboto,
+          Arial,
+          sans-serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+      .header {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 10px 16px;
+        background: var(--panel);
+        border-bottom: 1px solid var(--border);
+      }
+      .logo-badge {
+        width: 24px;
+        height: 24px;
+        background: #ff3d00;
+        border-radius: 6px;
+        display: inline-block;
+      }
+      .watch {
+        display: grid;
+        grid-template-columns: 1fr 360px;
+        gap: 18px;
+        padding: 16px;
+      }
+      .player {
+        background: #000;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        overflow: hidden;
+      }
+      .title {
+        font-weight: 700;
+        font-size: 18px;
+        margin: 10px 0;
+      }
+      . meta {
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 12px;
+      }
+      .stack {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      video {
+        width: 100%;
+        height: auto;
+        display: block;
+      }
+      .pill {
+        display: inline-block;
+        padding: 6px 10px;
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .upnext-item {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 6px 0;
+        text-decoration: none;
+        color: var(--text);
+      }
+      .upnext-item img {
+        width: 80px;
+        height: 45px;
+        object-fit: cover;
+        border-radius: 6px;
+        border: 1px solid var(--border);
+      }
+      .upnext-item span {
+        font-size: 14px;
+        flex: 1;
+      }
     </style>
     <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
     <script src="https://cdn.dashjs.org/latest/dash.all.min.js"></script>
@@ -35,60 +122,73 @@
         </div>
         <div id="videoTitle" class="title"></div>
         <div id="videoMeta" class="meta"></div>
-        <div class="stack" style="margin-top:12px">
+        <div class="stack" style="margin-top: 12px">
           <span class="pill">HLS</span>
           <span class="pill">DASH</span>
         </div>
       </section>
       <aside class="panel">
-        <div style="font-weight:700;margin-bottom:8px">Up Next</div>
+        <div style="font-weight: 700; margin-bottom: 8px">Up Next</div>
         <div id="upnext" class="stack"></div>
       </aside>
     </main>
     <script>
-      const BACKEND_URL = 'http://localhost:8000';
+      const BACKEND_URL = "http://localhost:8000";
       const urlParams = new URLSearchParams(window.location.search);
-      const vhash = urlParams.get('v');
+      const vhash = urlParams.get("v");
 
-      const videoEl = document.getElementById('videoEl');
-      const titleEl = document.getElementById('videoTitle');
-      const metaEl = document.getElementById('videoMeta');
-      const upnextEl = document.getElementById('upnext');
+      const videoEl = document.getElementById("videoEl");
+      const titleEl = document.getElementById("videoTitle");
+      const metaEl = document.getElementById("videoMeta");
+      const upnextEl = document.getElementById("upnext");
 
-      async function fetchVideos(){
+      async function fetchVideos() {
         const resp = await fetch(`${BACKEND_URL}/videos`);
         return await resp.json();
       }
 
-      function pickVideo(videos){
-        if(!vhash) return videos[0];
-        return videos.find(x=>x.video_hash===vhash) || videos[0];
+      function pickVideo(videos) {
+        if (!vhash) return videos[0];
+        return videos.find((x) => x.video_hash === vhash) || videos[0];
       }
 
-      function renderUpNext(videos, current){
-        upnextEl.innerHTML = '';
-        videos.filter(v=>v.video_hash!==current.video_hash).slice(0,6).forEach(v=>{
-          const a = document.createElement('a');
-          a.href = `./streaming.html?v=${encodeURIComponent(v.video_hash)}`;
-          a.textContent = v.title || 'Untitled';
-          a.style.color = '#e6e6e6';
-          upnextEl.appendChild(a);
-        });
+      function renderUpNext(videos, current) {
+        upnextEl.innerHTML = "";
+        videos
+          .filter((v) => v.video_hash !== current.video_hash)
+          .slice(0, 6)
+          .forEach((v) => {
+            const a = document.createElement("a");
+            a.href = `./streaming.html?v=${encodeURIComponent(v.video_hash)}`;
+            a.className = "upnext-item";
+
+            const img = document.createElement("img");
+            img.src = v.thumbnail_url
+              ? `${BACKEND_URL}${v.thumbnail_url}`
+              : "https://via.placeholder.com/80x45?text=No+Thumbnail";
+
+            const span = document.createElement("span");
+            span.textContent = v.title || "Untitled";
+
+            a.appendChild(img);
+            a.appendChild(span);
+            upnextEl.appendChild(a);
+          });
       }
 
-      function playVideo(video){
-        titleEl.textContent = video.title || 'Untitled';
+      function playVideo(video) {
+        titleEl.textContent = video.title || "Untitled";
         metaEl.textContent = video.status;
-        if(video.hls_url){
+        if (video.hls_url) {
           const hlsSrc = `${BACKEND_URL}${video.hls_url}`;
-          if(Hls.isSupported()){
+          if (Hls.isSupported()) {
             const hls = new Hls();
             hls.loadSource(hlsSrc);
             hls.attachMedia(videoEl);
-          }else if(videoEl.canPlayType('application/vnd.apple.mpegurl')){
+          } else if (videoEl.canPlayType("application/vnd.apple.mpegurl")) {
             videoEl.src = hlsSrc;
           }
-        }else if(video.dash_url){
+        } else if (video.dash_url) {
           const player = dashjs.MediaPlayer().create();
           player.initialize(videoEl, `${BACKEND_URL}${video.dash_url}`, true);
         }
@@ -96,8 +196,8 @@
 
       (async () => {
         const videos = await fetchVideos();
-        if(!videos.length){
-          titleEl.textContent = 'No videos yet';
+        if (!videos.length) {
+          titleEl.textContent = "No videos yet";
           return;
         }
         const current = pickVideo(videos);

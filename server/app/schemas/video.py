@@ -12,24 +12,13 @@ class VideoSchema(BaseModel):
     url: str | None
     hls_url: str | None
     dash_url: str | None
+    thumbnail_url: str | None
     created_at: datetime
     updated_at: datetime
 
     class Config:
         orm_mode = True
 
-
-class VideoVarientSchema(BaseModel):
-    id: int
-    video_id: int
-    resolution: str # e.g., '1080p', '720p'
-    format: str # e.g., 'HLS', 'DASH'
-    url: str
-    created_at: str
-    updated_at: str
-
-    class Config:
-        orm_mode = True
 
 class VideoInitSchema(BaseModel):
     title: str = Field(..., example="Sample Video")

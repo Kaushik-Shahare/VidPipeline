@@ -74,3 +74,17 @@ def transcode_to_dash(input_file, output_dir):
 
     logging.info(f"DASH transcoding completed: {output_path}")
     return output_path
+
+def video_thumbnail(input_file, output_dir, time_offset="00:00:01"):
+    logging.info(f"Generating thumbnail for {input_file} at {time_offset}")
+
+    output_file = os.path.join(output_dir, 'thumbnail.jpg')
+
+    try:
+        ffmpeg.input(input_file, ss=time_offset).output(output_file, **{'vframes': 1}).run(overwrite_output=True)
+        logging.info(f"Thumbnail generated: {output_file}")
+    except ffmpeg.Error as e:
+        logging.error(f"Thumbnail generation failed: {e}")
+        raise
+
+    return output_file

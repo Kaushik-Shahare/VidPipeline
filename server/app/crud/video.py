@@ -1,8 +1,8 @@
 from fastapi import Depends
 from sqlalchemy.future import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from models.video import Video, VideoVarient
-from schemas.video import VideoSchema, VideoVarientSchema
+from models.video import Video
+from schemas.video import VideoSchema
 from core.database import get_db
 
 async def get_all_videos(db: AsyncSession) -> list[Video]:
