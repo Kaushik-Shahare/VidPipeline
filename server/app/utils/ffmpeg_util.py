@@ -2,7 +2,7 @@ import ffmpeg
 import os
 import logging
 
-logging.basicConfig(level=logging.INFO, filename='ffmpeg.log')
+logging.basicConfig(level=logging.INFO, filename='logs/ffmpeg.log')
 
 def transcode_to_hls(input_file, output_dir):
     logging.info(f"Starting HLS transcoding for {input_file} into {output_dir}")

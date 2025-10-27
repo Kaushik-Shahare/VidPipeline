@@ -2,15 +2,25 @@ from aiokafka import AIOKafkaConsumer
 from utils.ffmpeg_util import transcode_to_dash, transcode_to_hls, video_thumbnail
 from crud.video import update_video_details
 from core.database import AsyncSessionLocal
+from concurrent.futures import ThreadPoolExecutor
+from dotenv import load_dotenv
 import logging
 import json
 import os
 import asyncio
 
-logging.basicConfig(filename='worker.log', level=logging.INFO)
+load_dotenv()
 
-kafka_bootstrap_servers = 'localhost:9092'
-kafka_topic = 'video_processing'
+logging.basicConfig(filename='logs/worker.log', level=logging.INFO)
+
+kafka_bootstrap_servers = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+kafka_topic = os.getenv("KAFKA_VIDEO_TOPIC")
+
+executor = ThreadPoolExecutor(max_workers=2)
+
+async def run_ffmpeg_async(func, *args, **kwargs):
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(executor, lambda: func(*args, **kwargs))
 
 async def process_video_message(message):
     logging.info("Processing video message")
@@ -35,13 +45,13 @@ async def process_video_message(message):
 
     logging.info(f"Transcoding video {video_hash}")
 
-    hls_path = transcode_to_hls(input_path, output_dir)
+    hls_path = await run_ffmpeg_async(transcode_to_hls, input_path, output_dir)
     logging.info(f"Transcoding to DASH for video {video_hash}")
 
-    dash_path = transcode_to_dash(input_path, output_dir)
+    dash_path = await run_ffmpeg_async(transcode_to_dash, input_path, output_dir)
     logging.info(f"Transcoding completed for {video_hash}")
 
-    thumbnail_path = video_thumbnail(input_path, output_dir)
+    thumbnail_path = await run_ffmpeg_async(video_thumbnail, input_path, output_dir)
     logging.info(f"Thumbnail Generation Completed for video_hash {video_hash}")
 
     logging.info(f"Updating video status to completed for {video_hash}")

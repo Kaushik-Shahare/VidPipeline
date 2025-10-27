@@ -8,6 +8,7 @@ import asyncio
 from fastapi.staticfiles import StaticFiles
 import os
 import mimetypes
+import logging
 
 # For creating tables if they don't exist
 @asynccontextmanager
@@ -19,6 +20,26 @@ async def lifespan(app: FastAPI):
         await conn.run_sync(Base.metadata.create_all)
     yield
     task.cancel()
+
+# Logging configuration
+LOG_FILE  = "logs/main.log"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.FileHandler(LOG_FILE, mode='a'),
+        logging.StreamHandler()
+    ]
+)
+
+uvicorn_logger = logging.getLogger("uvicorn")
+uvicorn_logger.handlers = logging.getLogger().handlers
+uvicorn_logger.setLevel(logging.INFO)
+
+uvicorn_access = logging.getLogger("uvicorn.access")
+uvicorn_access.handlers = logging.getLogger().handlers
+uvicorn_access.setLevel(logging.INFO)
 
 
 app = FastAPI(lifespan=lifespan)
