@@ -3,23 +3,35 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from api import video
 from core.database import engine, Base
-from workers.video_processing import consume_video_processing_message
-import asyncio
 from fastapi.staticfiles import StaticFiles
 import os
 import mimetypes
 import logging
+import asyncio
 
 # For creating tables if they don't exist
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    loop = asyncio.get_event_loop()
-    task = loop.create_task(consume_video_processing_message())
-
+    # Startup
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    
+    # Start Kafka consumer in background
+    from utils.kafka import consume_video_processing_messages
+    from celery_app import celery_app
+    
+    consumer_task = asyncio.create_task(consume_video_processing_messages(celery_app))
+    logger = logging.getLogger(__name__)
+    logger.info("Kafka consumer task started in background")
+    
     yield
-    task.cancel()
+    
+    # Shutdown
+    consumer_task.cancel()
+    try:
+        await consumer_task
+    except asyncio.CancelledError:
+        logger.info("Kafka consumer task cancelled")
 
 # Logging configuration
 LOG_FILE  = "logs/main.log"

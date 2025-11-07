@@ -17,9 +17,9 @@ def generate_video_hash(title: str, total_chunks: int) -> str:
     
 
 @router.post("/init")
-async def init_video_upload(payload: VideoInitSchema, db: AsyncSession = Depends(get_db)) :
+async def init_video_upload(payload: VideoInitSchema, db: AsyncSession = Depends(get_db)) : 
     video_hash = generate_video_hash(payload.title, payload.total_chunks)
-
+    
     # Check if video with the same hash already exists
     existing_video = await get_video_by_hash(db, video_hash)
     if existing_video:
@@ -105,7 +105,7 @@ async def upload_video_finalize(video_hash: str, db: AsyncSession = Depends(get_
     import shutil
     shutil.rmtree(temp_dir)
 
-    # Trigger async processing 
+    # Trigger async processing via Kafka (non-blocking)
     await send_video_processing_message(video_hash, final_video_path)
     
     return {"message": "Video upload finalized and processing started", "video_hash": video_hash, "video_url": video.url}

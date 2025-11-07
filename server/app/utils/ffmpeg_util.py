@@ -81,6 +81,7 @@ def video_thumbnail(input_file, output_dir, time_offset="00:00:01"):
     output_file = os.path.join(output_dir, 'thumbnail.jpg')
 
     try:
+        # Use proper parameters for single image output
         ffmpeg.input(input_file, ss=time_offset).output(output_file, **{'vframes': 1}).run(overwrite_output=True)
         logging.info(f"Thumbnail generated: {output_file}")
     except ffmpeg.Error as e:
