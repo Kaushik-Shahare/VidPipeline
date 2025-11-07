@@ -1,10 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
-import os
 from sqlalchemy.ext.asyncio import AsyncSession
 from crud.video import (get_video_by_hash, create_video, get_all_videos)
 from schemas.video import VideoSchema, VideoInitSchema
 from core.database import get_db
 from utils.kafka import send_video_processing_message
+from utils.azure_blob import stage_video_chunk, commit_video_upload
 
 router = APIRouter(prefix="/videos", tags=["videos"])
 
@@ -52,13 +52,14 @@ async def upload_video_chunk(video_hash: str, chunk_index: int, chunk_data: Uplo
     if chunk_index < 0 or chunk_index >= video.total_chunks:
         raise HTTPException(status_code=400, detail="Invalid chunk index")
 
-    # Save to temporary storage (Local filesystem for dev)
-    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    temp_dir = os.path.join(base_dir, "media", "uploads", video_hash, "temp")
-    os.makedirs(temp_dir, exist_ok=True)
-    chunk_path = os.path.join(temp_dir, f"chunk_{chunk_index}")
-    with open(chunk_path, "wb") as buffer:
-        buffer.write(await chunk_data.read())
+    chunk_bytes = await chunk_data.read()
+    if not chunk_bytes:
+        raise HTTPException(status_code=400, detail="Chunk data is empty")
+
+    try:
+        stage_video_chunk(video_hash, chunk_index, chunk_bytes)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     # Update received chunks count
     video.received_chunks += 1
     await db.commit()
@@ -84,29 +85,19 @@ async def upload_video_finalize(video_hash: str, db: AsyncSession = Depends(get_
     if video.received_chunks != video.total_chunks:
         raise HTTPException(status_code=400, detail="Not all chunks have been uploaded")
 
-    # Merge chunks and process video (Placeholder logic)
-    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    temp_dir = os.path.join(base_dir, "media", "uploads", video_hash, "temp")
-    final_video_path = os.path.join(base_dir, "media", "uploads", video_hash, "final_video.mp4")
-    
-    with open(final_video_path, "wb") as final_video_file:
-        for i in range(video.total_chunks):
-            chunk_path = os.path.join(temp_dir, f"chunk_{i}")
-            with open(chunk_path, "rb") as chunk_file:
-                final_video_file.write(chunk_file.read())
-    
+    try:
+        blob_url = commit_video_upload(video_hash, video.total_chunks)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
     # Update video status and URL
     video.status = "processing"
-    video.url = final_video_path
+    video.url = blob_url
     await db.commit()
     await db.refresh(video)
 
-    # Delete Temp Chunks with recursive deletion 
-    import shutil
-    shutil.rmtree(temp_dir)
-
     # Trigger async processing via Kafka (non-blocking)
-    await send_video_processing_message(video_hash, final_video_path)
+    await send_video_processing_message(video_hash, f"{video_hash}/source.mp4")
     
     return {"message": "Video upload finalized and processing started", "video_hash": video_hash, "video_url": video.url}
 

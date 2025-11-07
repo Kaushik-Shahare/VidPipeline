@@ -19,7 +19,7 @@ async def send_video_processing_message(video_hash: str, video_path: str):
     
     Args:
         video_hash: The hash of the video
-        video_path: Path to the video file
+        video_path: Location of the uploaded video (Azure blob name)
     """
     producer = None
     try:

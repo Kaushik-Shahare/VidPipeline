@@ -61,6 +61,7 @@ async def _async_process_video(video_hash: str, input_path: str):
     if app_dir not in sys.path:
         sys.path.insert(0, app_dir)
     
+    from utils.azure_blob import download_video_blob, upload_directory
     from utils.ffmpeg_util import transcode_to_dash, transcode_to_hls, video_thumbnail
     from crud.video import update_video_details
     from core.database import AsyncSessionLocal
@@ -69,21 +70,44 @@ async def _async_process_video(video_hash: str, input_path: str):
     logger = logging.getLogger(__name__)
     logger.info(f"Transcoding video {video_hash}")
     
-    # Derive output directory from input path
-    try:
-        output_dir = os.path.dirname(input_path)
-    except Exception:
-        output_dir = f"media/uploads/{video_hash}"
+    # Ensure video is available locally for processing
+    local_dir = os.path.join(app_dir, "media", "uploads", video_hash)
+    os.makedirs(local_dir, exist_ok=True)
+
+    local_input_path = os.path.join(local_dir, "source.mp4")
+
+    if not os.path.exists(local_input_path) or os.path.getsize(local_input_path) == 0:
+        await run_ffmpeg_async(download_video_blob, video_hash, local_input_path)
+
+    # Derive output directory from local input path
+    output_dir = os.path.dirname(local_input_path)
     
     # Process video
-    hls_path = await run_ffmpeg_async(transcode_to_hls, input_path, output_dir)
+    hls_path = await run_ffmpeg_async(transcode_to_hls, local_input_path, output_dir)
     logger.info(f"Transcoding to DASH for video {video_hash}")
     
-    dash_path = await run_ffmpeg_async(transcode_to_dash, input_path, output_dir)
+    dash_path = await run_ffmpeg_async(transcode_to_dash, local_input_path, output_dir)
     logger.info(f"Transcoding completed for {video_hash}")
     
-    thumbnail_path = await run_ffmpeg_async(video_thumbnail, input_path, output_dir)
+    thumbnail_path = await run_ffmpeg_async(video_thumbnail, local_input_path, output_dir)
     logger.info(f"Thumbnail Generation Completed for video_hash {video_hash}")
+
+    # Upload processed outputs back to Azure Blob under the same directory as source
+    try:
+        # Exclude the original source file to avoid overwriting
+        upload_directory(video_hash, output_dir, dest_prefix="", exclude=["source.mp4"])
+        logger.info(f"Uploaded processed assets to Azure Blob for {video_hash}")
+
+        # After successful upload, remove local files to free disk space
+        try:
+            import shutil
+            shutil.rmtree(output_dir, ignore_errors=False)
+            logger.info(f"Deleted local processed directory for {video_hash}: {output_dir}")
+        except Exception as cleanup_err:
+            logger.warning(f"Could not delete local directory {output_dir} for {video_hash}: {cleanup_err}")
+
+    except Exception as e:
+        logger.exception(f"Failed to upload processed assets for {video_hash}: {e}")
     
     # Update database
     media_dir = os.path.join(app_dir, 'media')

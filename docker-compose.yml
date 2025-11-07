@@ -63,7 +63,7 @@ services:
       - "8081:8080"
     environment:
       KAFKA_CLUSTERS_0_NAME: kraft-cluster
-      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
       KAFKA_CLUSTERS_0_PROPERTIES_SECURITY_PROTOCOL: PLAINTEXT
       SERVER_PORT: 8080
 
@@ -76,6 +76,9 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
       - KAFKA_VIDEO_TOPIC=video_processing
+      - AZURE_STORAGE_CONNECTION_STRING=${AZURE_STORAGE_CONNECTION_STRING}
+      - AZURE_STORAGE_CONTAINER=${AZURE_STORAGE_CONTAINER:-videos}
+      - AZURE_STORAGE_URL=${AZURE_STORAGE_URL}
     depends_on:
       redis:
         condition: service_started
@@ -85,8 +88,14 @@ services:
   worker:
     build: ./server/app
     command: celery -A celery_app worker --loglevel=info --queues=video_processing
+    env_file: ./server/app/.env
     depends_on:
       - redis
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - AZURE_STORAGE_CONNECTION_STRING=${AZURE_STORAGE_CONNECTION_STRING}
+      - AZURE_STORAGE_CONTAINER=${AZURE_STORAGE_CONTAINER:-videos}
+      - AZURE_STORAGE_URL=${AZURE_STORAGE_URL}
 
   flower:
     image: mher/flower:latest
@@ -94,8 +103,11 @@ services:
       - "5555:5555"
     environment:
       - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    command: celery flower --broker=redis://redis:6379/0 --port=5555
     depends_on:
       - redis
+      - worker
 
   frontend:
     build: ./client
