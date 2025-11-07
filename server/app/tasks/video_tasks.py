@@ -93,9 +93,10 @@ async def _async_process_video(video_hash: str, input_path: str):
     logger.info(f"Thumbnail Generation Completed for video_hash {video_hash}")
 
     # Upload processed outputs back to Azure Blob under the same directory as source
+    uploaded_assets = {}
     try:
         # Exclude the original source file to avoid overwriting
-        upload_directory(video_hash, output_dir, dest_prefix="", exclude=["source.mp4"])
+        uploaded_assets = upload_directory(video_hash, output_dir, dest_prefix="", exclude=["source.mp4"])
         logger.info(f"Uploaded processed assets to Azure Blob for {video_hash}")
 
         # After successful upload, remove local files to free disk space
@@ -109,6 +110,14 @@ async def _async_process_video(video_hash: str, input_path: str):
     except Exception as e:
         logger.exception(f"Failed to upload processed assets for {video_hash}: {e}")
     
+    # Helper to normalize paths for lookup
+    def to_rel(path: str) -> str:
+        return os.path.relpath(path, output_dir).replace("\\", "/")
+
+    hls_rel = to_rel(hls_path)
+    dash_rel = to_rel(dash_path)
+    thumbnail_rel = to_rel(thumbnail_path)
+
     # Update database
     media_dir = os.path.join(app_dir, 'media')
     
@@ -126,9 +135,17 @@ async def _async_process_video(video_hash: str, input_path: str):
             logger.error(f"Error converting path {fs_path}: {e}")
             return fs_path
     
-    hls_url = to_web_path(hls_path)
-    dash_url = to_web_path(dash_path)
-    thumbnail_url = to_web_path(thumbnail_path)
+    def lookup_uploaded_url(rel_path: str, fallback_path: str) -> str:
+        info = uploaded_assets.get(rel_path, {})
+        url = info.get("url") if isinstance(info, dict) else None
+        if url:
+            return url
+        logger.warning(f"Falling back to local path for {rel_path} in video {video_hash}")
+        return to_web_path(fallback_path)
+
+    hls_url = lookup_uploaded_url(hls_rel, hls_path)
+    dash_url = lookup_uploaded_url(dash_rel, dash_path)
+    thumbnail_url = lookup_uploaded_url(thumbnail_rel, thumbnail_path)
     
     # Log the URLs for debugging
     logger.info(f"Generated URLs - HLS: {hls_url}, DASH: {dash_url}, Thumbnail: {thumbnail_url}")

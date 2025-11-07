@@ -59,7 +59,7 @@
         font-size: 18px;
         margin: 10px 0;
       }
-      . meta {
+      .meta {
         color: var(--muted);
         font-size: 12px;
       }
@@ -134,6 +134,54 @@
     </main>
     <script>
       const BACKEND_URL = "http://localhost:8000";
+
+      function isAbsoluteUrl(u) {
+        return typeof u === "string" && /^(https?:)?\/\//i.test(u);
+      }
+
+      function resolveUrl(u) {
+        if (!u) return null;
+        return isAbsoluteUrl(u) ? u : `${BACKEND_URL}${u}`;
+      }
+
+      function hasSasQuery(u) {
+        return typeof u === "string" && /[?&]sig=/i.test(u);
+      }
+
+      function normalizeToken(token) {
+        if (!token) return "";
+        return token.startsWith("?") ? token.slice(1) : token;
+      }
+
+      function appendSas(url, token) {
+        if (!token || !url || hasSasQuery(url) || !isAbsoluteUrl(url)) return url;
+        const separator = url.includes("?") ? "&" : "?";
+        return `${url}${separator}${token}`;
+      }
+
+      function createHlsLoader(token, originHint) {
+        if (!token) return Hls.DefaultConfig.loader;
+        const baseLoader = Hls.DefaultConfig.loader;
+
+        return class TokenLoader extends baseLoader {
+          constructor(config) {
+            super(config);
+          }
+
+          load(context, config, callbacks) {
+            if (context && typeof context.url === "string") {
+              const shouldAppend =
+                (!originHint || context.url.startsWith(originHint)) &&
+                !hasSasQuery(context.url) &&
+                isAbsoluteUrl(context.url);
+              if (shouldAppend) {
+                context.url = appendSas(context.url, token);
+              }
+            }
+            super.load(context, config, callbacks);
+          }
+        };
+      }
       const urlParams = new URLSearchParams(window.location.search);
       const vhash = urlParams.get("v");
 
@@ -164,7 +212,7 @@
 
             const img = document.createElement("img");
             img.src = v.thumbnail_url
-              ? `${BACKEND_URL}${v.thumbnail_url}`
+              ? resolveUrl(v.thumbnail_url)
               : "https://via.placeholder.com/80x45?text=No+Thumbnail";
 
             const span = document.createElement("span");
@@ -179,18 +227,43 @@
       function playVideo(video) {
         titleEl.textContent = video.title || "Untitled";
         metaEl.textContent = video.status;
+        const sasToken = normalizeToken(video.azure_sas_token);
         if (video.hls_url) {
-          const hlsSrc = `${BACKEND_URL}${video.hls_url}`;
+          const hlsSrc = resolveUrl(video.hls_url);
           if (Hls.isSupported()) {
-            const hls = new Hls();
-            hls.loadSource(hlsSrc);
+            let originHint = null;
+            try {
+              originHint = hlsSrc ? new URL(hlsSrc).origin : null;
+            } catch (_) {
+              originHint = null;
+            }
+
+            const hlsConfig = {};
+            if (sasToken) {
+              hlsConfig.loader = createHlsLoader(sasToken, originHint);
+            }
+            const hls = new Hls(hlsConfig);
+            hls.loadSource(appendSas(hlsSrc, sasToken));
             hls.attachMedia(videoEl);
           } else if (videoEl.canPlayType("application/vnd.apple.mpegurl")) {
-            videoEl.src = hlsSrc;
+            videoEl.src = appendSas(hlsSrc, sasToken);
           }
         } else if (video.dash_url) {
+          const dashSrc = resolveUrl(video.dash_url);
           const player = dashjs.MediaPlayer().create();
-          player.initialize(videoEl, `${BACKEND_URL}${video.dash_url}`, true);
+          if (sasToken) {
+            player.extend(
+              "RequestModifier",
+              function () {
+                return {
+                  modifyRequestHeader: (xhr) => xhr,
+                  modifyRequestURL: (url) => appendSas(url, sasToken),
+                };
+              },
+              true
+            );
+          }
+          player.initialize(videoEl, appendSas(dashSrc, sasToken), true);
         }
       }
 

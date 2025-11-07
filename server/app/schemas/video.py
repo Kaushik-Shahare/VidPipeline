@@ -1,7 +1,9 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from datetime import datetime
 
 class VideoSchema(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     video_hash: str
     title: str
@@ -13,12 +15,9 @@ class VideoSchema(BaseModel):
     hls_url: str | None
     dash_url: str | None
     thumbnail_url: str | None
+    azure_sas_token: str | None = None
     created_at: datetime
     updated_at: datetime
-
-    class Config:
-        orm_mode = True
-
 
 class VideoInitSchema(BaseModel):
     title: str = Field(..., example="Sample Video")

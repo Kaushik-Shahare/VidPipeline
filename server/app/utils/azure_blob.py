@@ -1,13 +1,19 @@
 import base64
+import logging
 import os
 from functools import lru_cache
-from typing import List
+from typing import Dict, List
 
 from azure.core.exceptions import AzureError, ResourceExistsError
 from azure.storage.blob import BlobServiceClient, ContentSettings
-from azure.storage.blob import generate_blob_sas, BlobSasPermissions
+from azure.storage.blob import (
+    generate_container_sas,
+    ContainerSasPermissions,
+    CorsRule,
+)
 import mimetypes
 import datetime
+from urllib.parse import urlparse
 
 
 def _require_env(name: str) -> str:
@@ -121,7 +127,7 @@ def upload_file(video_hash: str, local_path: str, blob_path: str) -> str:
     return f"{base_url}/{blob_path}" if base_url else client.get_blob_client(blob_path).url
 
 
-def upload_directory(video_hash: str, local_dir: str, dest_prefix: str = "", exclude: List[str] | None = None) -> None:
+def upload_directory(video_hash: str, local_dir: str, dest_prefix: str = "", exclude: List[str] | None = None) -> Dict[str, Dict[str, str]]:
     """Upload a local directory tree to Azure Blob under the video's folder.
 
     - If dest_prefix is empty, files are uploaded directly under `{video_hash}/`.
@@ -132,6 +138,8 @@ def upload_directory(video_hash: str, local_dir: str, dest_prefix: str = "", exc
 
     # Normalize prefix (avoid double slashes when empty)
     norm_prefix = dest_prefix.strip("/")
+
+    uploaded: Dict[str, Dict[str, str]] = {}
 
     for root, _dirs, files in os.walk(local_dir):
         for fname in files:
@@ -147,26 +155,127 @@ def upload_directory(video_hash: str, local_dir: str, dest_prefix: str = "", exc
             else:
                 blob_path = f"{video_hash}/{rel}"
 
-            upload_file(video_hash, lp, blob_path)
+            url = upload_file(video_hash, lp, blob_path)
+            uploaded[rel] = {"blob_path": blob_path, "url": url}
+
+    return uploaded
 
 
-def signed_url(blob_path: str, minutes_valid: int = 120) -> str:
+def _full_blob_url(blob_path: str) -> str:
+    base = _base_url().rstrip("/")
+    container = _container_name()
+
+    if not base:
+        return _container_client().get_blob_client(blob_path).url
+
+    # Ensure the container segment is present exactly once
+    if base.endswith(f"/{container}"):
+        return f"{base}/{blob_path}"
+
+    return f"{base}/{container}/{blob_path}"
+
+
+def generate_container_sas_token(minutes_valid: int = 120) -> str:
+    ensure_blob_cors()
     parts = _parse_conn_string()
     account = parts.get("AccountName")
     key = parts.get("AccountKey")
     if not account or not key:
         raise RuntimeError("Invalid Azure connection string: missing AccountName/AccountKey")
 
-    sas = generate_blob_sas(
+    return generate_container_sas(
         account_name=account,
         container_name=_container_name(),
-        blob_name=blob_path,
         account_key=key,
-        permission=BlobSasPermissions(read=True),
+        permission=ContainerSasPermissions(read=True, list=True),
         expiry=datetime.datetime.utcnow() + datetime.timedelta(minutes=minutes_valid),
     )
+
+
+def signed_url(blob_path: str, minutes_valid: int = 120, sas_token: str | None = None) -> str:
+    token = sas_token or generate_container_sas_token(minutes_valid)
+    base_url = _full_blob_url(blob_path)
+    if not token:
+        return base_url
+    separator = "&" if "?" in base_url else "?"
+    return f"{base_url}{separator}{token}"
+
+
+
+def blob_path_from_location(location: str | None) -> str:
+    """Extract the blob path (relative to the container) from a stored location."""
+
+    if not location:
+        return ""
+
+    location = location.strip()
+
+    # If no scheme, treat as already being the blob path
+    if "://" not in location:
+        path = location.lstrip("/")
+        # Handle legacy local paths like media/uploads/<hash>/...
+        legacy_prefix = "media/uploads/"
+        if path.startswith(legacy_prefix):
+            path = path[len(legacy_prefix):]
+        return path
+
+    parsed = urlparse(location)
+    path = parsed.path.lstrip("/")
+
+    container = _container_name()
+    container_prefix = f"{container}/"
+    if path.startswith(container_prefix):
+        return path[len(container_prefix):]
+
     base = _base_url().rstrip("/")
-    base_url = f"{base}/{blob_path}" if base else _container_client().get_blob_client(blob_path).url
-    return f"{base_url}?{sas}"
+    if base and location.startswith(f"{base}/"):
+        return location[len(base) + 1 :]
+
+    return path
 
 
+_CORS_CONFIGURED = False
+
+
+def ensure_blob_cors() -> None:
+    global _CORS_CONFIGURED
+    if _CORS_CONFIGURED:
+        return
+
+    origins_env = os.getenv("AZURE_BLOB_CORS_ORIGINS") or "*"
+    allowed_origins = ",".join(
+        [origin.strip() for origin in origins_env.split(",") if origin.strip()]
+    ) or "*"
+
+    cors_rule = CorsRule(
+        allowed_origins=allowed_origins,
+        allowed_methods="GET,HEAD,OPTIONS",
+        allowed_headers="*",
+        exposed_headers="*",
+        max_age_in_seconds=3600,
+    )
+
+    service_client = _blob_service_client()
+
+    try:
+        current_props = service_client.get_service_properties()
+        existing_rules = current_props.get("cors") or []
+        # If an identical rule already exists, skip update
+        for rule in existing_rules:
+            if (
+                rule.allowed_origins == cors_rule.allowed_origins
+                and rule.allowed_methods == cors_rule.allowed_methods
+                and rule.allowed_headers == cors_rule.allowed_headers
+                and rule.exposed_headers == cors_rule.exposed_headers
+                and rule.max_age_in_seconds == cors_rule.max_age_in_seconds
+            ):
+                _CORS_CONFIGURED = True
+                return
+
+        new_rules = list(existing_rules) + [cors_rule]
+        service_client.set_service_properties(cors=new_rules)
+        _CORS_CONFIGURED = True
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "Unable to configure Azure Blob CORS: %s", exc
+        )

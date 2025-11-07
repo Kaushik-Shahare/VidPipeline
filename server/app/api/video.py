@@ -1,12 +1,22 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 from crud.video import (get_video_by_hash, create_video, get_all_videos)
 from schemas.video import VideoSchema, VideoInitSchema
 from core.database import get_db
 from utils.kafka import send_video_processing_message
-from utils.azure_blob import stage_video_chunk, commit_video_upload
+from utils.azure_blob import (
+    stage_video_chunk,
+    commit_video_upload,
+    signed_url,
+    blob_path_from_location,
+    generate_container_sas_token,
+)
 
 router = APIRouter(prefix="/videos", tags=["videos"])
+
+logger = logging.getLogger(__name__)
 
 
 # Generate a unique video hash (Consistent Hashing)
@@ -105,4 +115,26 @@ async def upload_video_finalize(video_hash: str, db: AsyncSession = Depends(get_
 @router.get("", response_model=list[VideoSchema])
 async def list_videos(db: AsyncSession = Depends(get_db)):
     videos = await get_all_videos(db)
-    return videos
+    signed_videos: list[VideoSchema] = []
+
+    for video in videos:
+        video_data = VideoSchema.from_orm(video).dict()
+
+        sas_token: str | None = None
+        for field in ("url", "hls_url", "dash_url", "thumbnail_url"):
+            value = video_data.get(field)
+            blob_path = blob_path_from_location(value)
+            if not blob_path:
+                continue
+            try:
+                if sas_token is None:
+                    sas_token = generate_container_sas_token()
+                    video_data["azure_sas_token"] = sas_token
+                video_data[field] = signed_url(blob_path, sas_token=sas_token)
+            except Exception as exc:  # Azure misconfiguration shouldn't break API
+                logger.warning("Failed to generate signed URL for %s (%s): %s", field, blob_path, exc)
+        if sas_token is None:
+            video_data.setdefault("azure_sas_token", None)
+        signed_videos.append(VideoSchema(**video_data))
+
+    return signed_videos
