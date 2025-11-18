@@ -16,22 +16,13 @@ async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     
-    # Start Kafka consumer in background
-    from utils.kafka import consume_video_processing_messages
-    from celery_app import celery_app
-    
-    consumer_task = asyncio.create_task(consume_video_processing_messages(celery_app))
     logger = logging.getLogger(__name__)
-    logger.info("Kafka consumer task started in background")
+    logger.info("FastAPI application started")
     
     yield
     
     # Shutdown
-    consumer_task.cancel()
-    try:
-        await consumer_task
-    except asyncio.CancelledError:
-        logger.info("Kafka consumer task cancelled")
+    logger.info("FastAPI application shutting down")
 
 # Logging configuration
 LOG_FILE  = "logs/main.log"

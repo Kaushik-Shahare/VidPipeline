@@ -1,215 +1,280 @@
 # VidPipeline
 
-Raw, professional, and precise. A local video streaming playground for learning HLS and DASH pipelines.
+Raw, practical, and intentionally engineered — a local video streaming playground built for understanding HLS/DASH streaming pipelines, async video processing, and distributed system patterns.
 
 ## Overview
 
-VidPipeline is a hands-on, experimental video streaming server to learn and demo:
+VidPipeline lets you test, demo, or learn the full video processing pipeline:
 
-- Chunked uploads for large files
-- Asynchronous transcoding to HLS (.m3u8) and DASH (.mpd)
-- Side-by-side playback in the browser
+- Chunked uploads for large video files
+- Asynchronous transcoding to HLS (`.m3u8`) and DASH (`.mpd`)
+- Side‑by‑side playback for comparison
+- Kafka + Celery powered background processing
 
-It’s ideal for understanding adaptive streaming, portfolio showcases, or interview demos.
+It’s ideal for:
+
+- Learning adaptive bitrate streaming
+- Building portfolio‑ready backend projects
+- Interview discussions around distributed systems
+- Experimenting with real transcoding workflows
+
+## Architecture
+
+```
+Client → FastAPI → Kafka → Kafka Consumer → Celery → FFmpeg → Media Output
+```
+
+**Message Flow**
+
+1. Upload chunks → finalize upload
+2. FastAPI pushes message to Kafka
+3. Kafka consumer receives message
+4. Celery schedules transcoding
+5. FFmpeg generates HLS + DASH outputs
+
+All processing is async and decoupled.
 
 ## Tech Stack
 
-- Backend: Python 3.12, FastAPI, SQLAlchemy (Async)
-- Video Processing: FFmpeg (h264_videotoolbox on macOS, fallback libx264), AAC
-- Task Queue: Celery with Redis backend
-- Message Broker: Kafka (Aiokafka consumer/producer) for API-to-Worker decoupling
-- Frontend: Vanilla JS (upload + playback pages)
-- Database: SQLite (dev). Compatible with async PostgreSQL
+- **Backend:** Python 3.12, FastAPI, SQLAlchemy Async
+- **Video Processing:** FFmpeg (hardware acceleration where possible)
+- **Async Tasks:** Celery (Redis backend)
+- **Messaging Queue:** Kafka (Aiokafka)
+- **Frontend:** Vanilla JS demo pages
+- **Database:** SQLite (dev), supports PostgreSQL
 
-**Architecture**: API → Kafka → Consumer (in lifespan) → Celery → FFmpeg Processing
-
-See [KAFKA_ARCHITECTURE.md](KAFKA_ARCHITECTURE.md) for detailed architecture documentation.
-
-## Project Layout
+## Project Structure
 
 ```
 VidPipeline/
 ├─ client/
-│  ├─ index.html          # Chunked upload UI (example)
-│  └─ streaming.html      # HLS/DASH side-by-side player
-├─ server/
-│  └─ app/
-│     ├─ main.py                  # FastAPI app entry (Kafka consumer in lifespan)
-│     ├─ celery_app.py            # Celery configuration
-│     ├─ api/video.py             # Upload + finalize endpoints
-│     ├─ utils/ffmpeg_util.py     # HLS/DASH transcoding helpers
-│     ├─ utils/kafka.py           # Kafka producer & consumer
-│     ├─ utils/celery_tasks.py    # Celery task utilities (deprecated)
-│     ├─ tasks/video_tasks.py     # Celery video processing tasks
-│     ├─ crud/                    # DB ops
-│     ├─ models/                  # SQLAlchemy models
-│     ├─ schemas/                 # Pydantic schemas
-│     ├─ core/database.py         # Async DB engine + session
-│     └─ media/                   # Served at /media (uploads + outputs)
-├─ kafka/
-│  └─ docker-compose.yaml         # Local Kafka
-├─ KAFKA_ARCHITECTURE.md          # Detailed architecture documentation
+│  ├─ index.html
+│  └─ streaming.html
+├─ server/app/
+│  ├─ main.py
+│  ├─ celery_app.py
+│  ├─ api/video.py
+│  ├─ utils/
+│  │  ├─ azure_blob.py
+│  │  ├─ celery_task.py
+│  │  ├─ ffmpeg_util.py
+│  │  └─ kafka.html
+│  ├─ tasks/video_tasks.py
+│  ├─ models/
+│  ├─ schemas/
+│  ├─ crud/
+│  ├─ core/database.py
+│  └─ media/
 └─ README.md
 ```
 
-## Prerequisites
+---
 
-- Python 3.12+
-- FFmpeg installed locally (macOS: brew install ffmpeg)
-- Redis (for Celery backend)
-- Docker + Docker Compose (for Kafka)
+# Setup Using Docker (Full Stack)
 
-## Docker Setup
+This is the easiest, most production‑like setup.
 
-1. Clone
+## 1. Clone the Repository
 
 ```bash
 git clone https://github.com/Kaushik-Shahare/VidPipeline.git
 cd VidPipeline
 ```
 
-2. Build and start all services using Docker Compose
+## 2. Create Environment Files
+
+You need **two** `.env` files:
+
+### **A) Root `.env` file (VidPipeline/.env)**
+
+Used by docker‑compose for global services.
+
+```
+DATABASE_URL=sqlite+aiosqlite:///./server.db
+KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+KAFKA_VIDEO_TOPIC=video_processing
+REDIS_URL=redis://redis:6379/0
+
+AZURE_STORAGE_CONNECTION_STRING=
+AZURE_STORAGE_CONTAINER=videos
+AZURE_STORAGE_URL=
+```
+
+### **B) Backend `.env` file (server/app/.env)**
+
+```
+DATABASE_URL=sqlite+aiosqlite:///./server.db
+KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+KAFKA_VIDEO_TOPIC=video_processing
+REDIS_URL=redis://redis:6379/0
+
+AZURE_STORAGE_CONNECTION_STRING=
+AZURE_STORAGE_CONTAINER=videos
+AZURE_STORAGE_URL=
+```
+
+## 3. Start Services
+
+From project root:
 
 ```bash
 docker compose up -d
 ```
 
-## Manual Setup
+This starts:
 
-1. Clone
+- Kafka broker
+- Zookeeper
+- Redis
+- FastAPI backend
+- Celery workers
+- Kafka consumers
+- Kafka UI ([http://localhost:8081](http://localhost:8081))
+- Frontend (optional depending on compose config)
 
-````bash
+## 4. Verify Kafka Topic Exists
+
+```bash
+docker exec -it kafka \
+  kafka-topics --bootstrap-server kafka:29092 --describe --topic video_processing
+```
+
+You should see **PartitionCount > 1** if using a multi‑partition setup.
+
+## 5. Access the App
+
+- Backend API: [http://localhost:8000/docs](http://localhost:8000/docs)
+- Kafka UI: [http://localhost:8081](http://localhost:8081)
+- Frontend demo: [http://localhost:3000](http://localhost:3000) (if enabled)
+
+---
+
+# Manual Setup (Without Docker)
+
+Useful if you want to run Kafka via Docker but everything else locally.
+
+## 1. Clone
+
+```bash
 git clone https://github.com/Kaushik-Shahare/VidPipeline.git
 cd VidPipeline
-``` 2. Start Kafka (for async processing)
+```
+
+## 2. Start Kafka
 
 ```bash
 cd kafka
 docker compose up -d
 cd ..
-````
+```
 
-3. Backend environment
+## 3. Backend Setup
 
 ```bash
 cd server/app
 python -m venv venv
 source venv/bin/activate
-pip install --upgrade pip
 pip install -r requirements.txt
-
-# Create .env file from example
 cp .env.example .env
-# Edit .env with your configuration
 ```
 
-4. Start Redis (for Celery)
+Edit `.env` values.
+
+## 4. Start Redis
 
 ```bash
-# macOS
-brew install redis
-brew services start redis
-
-# Or using Docker
 docker run -d -p 6379:6379 redis:alpine
 ```
 
-5. Start Celery Worker
+## 5. Start Celery
 
 ```bash
 cd server/app
 celery -A celery_app worker --loglevel=info -Q video_processing
 ```
 
-Keep this terminal running.
-
-6. Run FastAPI
-
-In a new terminal:
+## 6. Start FastAPI
 
 ```bash
-cd server/app
-source venv/bin/activate
 uvicorn main:app --reload --port 8000
 ```
 
-Notes:
-
-- The app statically serves media at `/media` with proper MIME types for `.mpd` and `.m3u8`.
-- The Kafka consumer is started inside the FastAPI lifespan event.
-- Messages flow: API → Kafka → Consumer (in lifespan) → Celery → Processing
-
-5. Frontend
-
-Run a simple HTTP server to avoid file:// CORS:
+## 7. Frontend Static Server
 
 ```bash
-cd ../../client
+cd client
 python3 -m http.server 8080
-# Open http://localhost:8080/streaming.html
 ```
 
-## Usage
+---
 
-1. Upload via the client UI (index.html) or API:
+# Usage
 
-- Initialize: POST /videos/init
-- Upload chunks: POST /videos/upload_chunk/{video_hash}/{chunk_index}
-- Finalize: POST /videos/finalize/{video_hash}
+1. Upload video using `client/index.html`
+2. Call `POST /videos/finalize/{hash}`
+3. FastAPI pushes a message → Kafka
+4. Consumer sends message → Celery
+5. FFmpeg generates:
 
-2. Processing
+   - HLS playlist + segments
+   - DASH manifest + segments
+   - Thumbnail
 
-- Finalize sends a message to Kafka. The Kafka consumer (running in FastAPI lifespan) picks it up and sends it to Celery.
-- Celery worker runs FFmpeg to produce:
-  - HLS: `/media/uploads/<hash>/hls/playlist.m3u8`
-  - DASH: `/media/uploads/<hash>/dash/manifest.mpd`
-  - Thumbnail: `/media/uploads/<hash>/thumbnail.jpg`
-- The DB is updated with `status=completed`, `url` (HLS), `hls_url`, `dash_url`, `thumbnail_url`.
+6. View results in `client/streaming.html`
 
-3. Playback
+Media served at `/media` via FastAPI.
 
-- Open `client/streaming.html` served over HTTP. It fetches `/videos`, then plays both HLS and DASH using URLs served by the FastAPI app.
+---
 
-## Troubleshooting
+# Troubleshooting
 
-- FFmpeg input not found:
-  - Ensure `finalize` created the file at an absolute path.
-  - Check Kafka consumer logs in FastAPI output.
-  - Verify Celery worker is running and consuming tasks.
-  - Check logs: `server/app/logs/main.log`.
-- CORS on manifests/segments:
-  - Access the client via HTTP (not file://).
-  - Ensure backend is running and `/media` is mounted (see `main.py`).
-- Kafka not reachable:
-  - Confirm docker compose is up and broker is on `localhost:9092`.
-  - Check `KAFKA_BOOTSTRAP_SERVERS` in `.env` file.
-- Celery tasks not running:
-  - Ensure Redis is running (`redis-cli ping` should return PONG).
-  - Verify Celery worker is started with correct queue: `-Q video_processing`.
-  - Check `REDIS_URL` in `.env` file.
-- Messages stuck in Kafka:
-  - Check consumer group status: `kafka-consumer-groups --bootstrap-server localhost:9092 --describe --group video-processing-group`
-  - Look for consumer lag in the output.
+### FFmpeg errors
 
-## Why VidPipeline
+- File paths incorrect → check upload directory
+- Permissions issue inside Docker
+- macOS hardware acceleration not supported → fallback to libx264
 
-- Learn chunked uploads and async processing
-- Understand adaptive streaming (HLS vs DASH)
-- Experience Kafka-based message-driven architecture
-- Learn Celery task queue integration
-- Great for demos and portfolio work
-- Lightweight, local, production-like pipeline with fault tolerance
+### Kafka not receiving messages
 
-## License
+- Confirm topic exists
+- Check consumer errors in backend logs
+- Verify `KAFKA_BOOTSTRAP_SERVERS=kafka:29092`
+
+### Celery tasks not running
+
+- Check Redis running
+- Ensure worker queue matches: `-Q video_processing`
+
+### HLS/DASH not playing
+
+- Must be served over HTTP, not `file://`
+- Check MIME types in FastAPI static configuration
+
+---
+
+# Future Improvements
+
+Planned extensions for full observability and production‑grade monitoring:
+
+- **Grafana** (dashboards)
+- **Prometheus** (metrics scraping)
+- **Node Exporter** (host-level metrics)
+- **Grafana Loki** (centralized logs)
+- **Alertmanager** (optional)
+
+These will provide:
+
+- System load visualization
+- Worker/task execution metrics
+- Kafka consumer lag monitoring
+- FFmpeg processing time breakdown
+
+---
+
+# License
 
 MIT
 
-## Future Improvements
+---
 
-- Live streaming (WebSockets)
-- Enhanced monitoring and metrics (Prometheus/Grafana)
-- Auth and multi-user support
-- Dockerize full stack
-- Multi-region Kafka deployment
-- Dead letter queue for failed messages
-- Video quality selection and multiple bitrates
+VidPipeline is built to understand real distributed video pipelines — adaptive streaming, background workloads, and message-driven design — without the overhead of enterprise infrastructure.

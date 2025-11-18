@@ -243,13 +243,11 @@ def ensure_blob_cors() -> None:
         return
 
     origins_env = os.getenv("AZURE_BLOB_CORS_ORIGINS") or "*"
-    allowed_origins = ",".join(
-        [origin.strip() for origin in origins_env.split(",") if origin.strip()]
-    ) or "*"
+    allowed_origins = [origin.strip() for origin in origins_env.split(",") if origin.strip()] or ["*"]
 
     cors_rule = CorsRule(
         allowed_origins=allowed_origins,
-        allowed_methods="GET,HEAD,OPTIONS",
+        allowed_methods=["GET","HEAD","OPTIONS"],
         allowed_headers="*",
         exposed_headers="*",
         max_age_in_seconds=3600,

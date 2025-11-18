@@ -35,7 +35,7 @@ services:
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
       KAFKA_LOG_RETENTION_HOURS: 24
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
@@ -62,8 +62,10 @@ services:
     ports:
       - "8081:8080"
     environment:
-      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_NAME: kraft-cluster
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_PROPERTIES_SECURITY_PROTOCOL: PLAINTEXT
+      SERVER_PORT: 8080
 
   backend:
     build: ./server/app
@@ -71,95 +73,50 @@ services:
     ports:
       - "8000:8000"
     environment:
-      REDIS_URL: redis://redis:6379/0
-      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-      KAFKA_VIDEO_TOPIC: video_processing
+      - REDIS_URL=redis://redis:6379/0
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
+      - KAFKA_VIDEO_TOPIC=video_processing
+      - AZURE_STORAGE_CONNECTION_STRING=${AZURE_STORAGE_CONNECTION_STRING}
+      - AZURE_STORAGE_CONTAINER=${AZURE_STORAGE_CONTAINER:-videos}
+      - AZURE_STORAGE_URL=${AZURE_STORAGE_URL}
     depends_on:
       redis:
         condition: service_started
       kafka:
         condition: service_healthy
 
-  # -----------------------------
-  # MULTIPLE CELERY WORKERS
-  # -----------------------------
-
-  worker1:
+  worker:
     build: ./server/app
     command: celery -A celery_app worker --loglevel=info --queues=video_processing
-    env_file: ./server/app/.env
-    depends_on: [redis]
-    environment:
-      REDIS_URL: redis://redis:6379/0
-
-  worker2:
-    build: ./server/app
-    command: celery -A celery_app worker --loglevel=info --queues=video_processing
-    env_file: ./server/app/.env
-    depends_on: [redis]
-    environment:
-      REDIS_URL: redis://redis:6379/0
-
-  worker3:
-    build: ./server/app
-    command: celery -A celery_app worker --loglevel=info --queues=video_processing
-    env_file: ./server/app/.env
-    depends_on: [redis]
-    environment:
-      REDIS_URL: redis://redis:6379/0
-
-  # -----------------------------
-  # MULTIPLE KAFKA CONSUMERS
-  # -----------------------------
-
-  consumer1:
-    build: ./server/app
-    command: python kafka_consumer_service.py
     env_file: ./server/app/.env
     depends_on:
-      kafka:
-        condition: service_healthy
-      redis:
-        condition: service_started
+      - redis
     environment:
-      REDIS_URL: redis://redis:6379/0
-      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-      KAFKA_VIDEO_TOPIC: video_processing
+      - REDIS_URL=redis://redis:6379/0
+      - AZURE_STORAGE_CONNECTION_STRING=${AZURE_STORAGE_CONNECTION_STRING}
+      - AZURE_STORAGE_CONTAINER=${AZURE_STORAGE_CONTAINER:-videos}
+      - AZURE_STORAGE_URL=${AZURE_STORAGE_URL}
 
-  consumer2:
-    build: ./server/app
-    command: python kafka_consumer_service.py
-    env_file: ./server/app/.env
-    depends_on:
-      kafka:
-        condition: service_healthy
-      redis:
-        condition: service_started
-    environment:
-      REDIS_URL: redis://redis:6379/0
-      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-      KAFKA_VIDEO_TOPIC: video_processing
-
-  # Flower UI
   flower:
     image: mher/flower:latest
     ports:
       - "5555:5555"
     environment:
-      CELERY_BROKER_URL: redis://redis:6379/0
-      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    command: celery flower --broker=redis://redis:6379/0 --port=5555
     depends_on:
       - redis
-      - worker1
-      - worker2
-      - worker3
+      - worker
 
   frontend:
     build: ./client
     ports:
       - "3000:3000"
-    depends_on: [backend]
+    depends_on:
+      - backend
 
 volumes:
   kafka_data:
   redis_data:
+  postgres_data:
