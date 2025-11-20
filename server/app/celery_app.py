@@ -21,7 +21,22 @@ celery_app.conf.update(
     result_serializer='json',
     timezone='UTC',
     enable_utc=True,
-    imports=('tasks.video_tasks',),  # Auto-discover tasks
+    imports=('tasks.video_tasks',),
+    
+    # Worker heartbeat and timeout settings to prevent worker death during long FFmpeg tasks
+    broker_heartbeat=0,  # Disable broker heartbeat (use worker heartbeat instead)
+    worker_prefetch_multiplier=1,  # Only fetch one task at a time to avoid blocking
+    worker_max_tasks_per_child=10,  # Restart worker after 10 tasks to prevent memory leaks
+    
+    # Task execution limits
+    task_soft_time_limit=1800,  # 30 minutes soft limit (allows cleanup)
+    task_time_limit=2100,  # 35 minutes hard limit
+    task_acks_late=True,  # Only acknowledge task after completion
+    task_reject_on_worker_lost=True,  # Requeue task if worker dies
+    
+    # Result backend settings
+    result_expires=3600,  # Results expire after 1 hour
+    result_backend_transport_options={'master_name': 'mymaster'},
 )
 
 # Import and register the task

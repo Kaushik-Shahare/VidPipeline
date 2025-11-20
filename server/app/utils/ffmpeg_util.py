@@ -1,6 +1,8 @@
 import ffmpeg
 import os
 import logging
+import subprocess
+import json
 
 logging.basicConfig(level=logging.INFO, filename='logs/ffmpeg.log')
 
@@ -8,17 +10,16 @@ def transcode_hls_profile(input_file, output_dir, profile: str):
     """Transcode a single HLS variant (profile) into a profile-specific folder.
 
     Output layout:
-    {output_dir}/hls/master.m3u8
     {output_dir}/hls/{profile}/playlist.m3u8
     """
     logging.info(f"Starting HLS transcoding for profile={profile} for {input_file} into {output_dir}")
 
     profiles = {
-        '144p': {'scale': '256:144', 'b:v': '200k', 'resolution': '256x144'},
-        '360p': {'scale': '640:360', 'b:v': '800k', 'resolution': '640x360'},
-        '480p': {'scale': '854:480', 'b:v': '1500k', 'resolution': '854x480'},
-        '720p': {'scale': '1280:720', 'b:v': '3000k', 'resolution': '1280x720'},
-        '1080p': {'scale': '1920:1080', 'b:v': '5000k', 'resolution': '1920x1080'},
+        '144p': {'scale': '256:144', 'b:v': '200k', 'resolution': '256x144', 'preset': 'veryfast'},
+        '360p': {'scale': '640:360', 'b:v': '800k', 'resolution': '640x360', 'preset': 'veryfast'},
+        '480p': {'scale': '854:480', 'b:v': '1500k', 'resolution': '854x480', 'preset': 'fast'},
+        '720p': {'scale': '1280:720', 'b:v': '3000k', 'resolution': '1280x720', 'preset': 'fast'},
+        '1080p': {'scale': '1920:1080', 'b:v': '5000k', 'resolution': '1920x1080', 'preset': 'fast'},
     }
 
     if profile not in profiles:
@@ -34,8 +35,8 @@ def transcode_hls_profile(input_file, output_dir, profile: str):
     segment_pattern = os.path.join(profile_dir, 'segment_%03d.ts')
 
     try:
-        # Use software encoder libx264 for broader compatibility; hardware fallback can be added
-        (
+        # Build ffmpeg command with optimized settings
+        cmd = (
             ffmpeg
             .input(input_file)
             .output(
@@ -45,11 +46,55 @@ def transcode_hls_profile(input_file, output_dir, profile: str):
                 hls_time=6,
                 hls_playlist_type='vod',
                 hls_segment_filename=segment_pattern,
-                **{'b:v': info['b:v'], 'c:v': 'libx264', 'c:a': 'aac'}
+                **{
+                    'c:v': 'libx264',
+                    'preset': info['preset'],
+                    'b:v': info['b:v'],
+                    'maxrate': info['b:v'],
+                    'bufsize': f"{int(info['b:v'][:-1]) * 2}k",
+                    'c:a': 'aac',
+                    'b:a': '128k',
+                    'threads': '0',
+                    'movflags': '+faststart'
+                }
             )
-            .run(overwrite_output=True)
+            .overwrite_output()
+            .compile()
         )
-    except ffmpeg.Error as e:
+        
+        # Run ffmpeg as subprocess with timeout protection
+        logging.info(f"Running FFmpeg command for {profile}: {' '.join(cmd)}")
+        
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True
+        )
+        
+        # Wait with timeout (profile-specific)
+        timeout_map = {
+            '144p': 300,   # 5 minutes
+            '360p': 600,   # 10 minutes
+            '480p': 900,   # 15 minutes
+            '720p': 1500,  # 25 minutes
+            '1080p': 3000, # 50 minutes
+        }
+        
+        try:
+            stdout, stderr = process.communicate(timeout=timeout_map.get(profile, 1800))
+        except subprocess.TimeoutExpired:
+            process.kill()
+            stdout, stderr = process.communicate()
+            raise RuntimeError(f"FFmpeg timeout after {timeout_map.get(profile, 1800)}s for {profile}")
+        
+        if process.returncode != 0:
+            logging.error(f"FFmpeg failed for {profile}:\nSTDERR:\n{stderr}")
+            raise RuntimeError(f"FFmpeg transcode failed for {profile}: {stderr}")
+        
+        logging.info(f"FFmpeg completed successfully for {profile}")
+        
+    except Exception as e:
         logging.error(f"HLS transcode for profile {profile} failed: {e}")
         raise
 
@@ -159,10 +204,30 @@ def video_thumbnail(input_file, output_dir, time_offset="00:00:01"):
     output_file = os.path.join(output_dir, 'thumbnail.jpg')
 
     try:
-        # single image output
-        ffmpeg.input(input_file, ss=time_offset).output(output_file, **{'vframes': 1}).run(overwrite_output=True)
+        # Build command
+        cmd = (
+            ffmpeg.input(input_file, ss=time_offset)
+            .output(output_file, vframes=1)
+            .overwrite_output()
+            .compile()
+        )
+        
+        # Run as subprocess
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True
+        )
+        
+        stdout, stderr = process.communicate()
+        
+        if process.returncode != 0:
+            logging.error(f"Thumbnail generation failed:\nSTDERR:\n{stderr}")
+            raise RuntimeError(f"Thumbnail generation failed: {stderr}")
+            
         logging.info(f"Thumbnail generated: {output_file}")
-    except ffmpeg.Error as e:
+    except Exception as e:
         logging.error(f"Thumbnail generation failed: {e}")
         raise
 

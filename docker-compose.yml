@@ -87,51 +87,93 @@ services:
 
   worker_144p:
     build: ./server/app
-    command: celery -A celery_app worker --loglevel=info --queues=video_processing_144p
+    command: celery -A celery_app worker --loglevel=info --queues=video_processing_144p --time-limit=600 --soft-time-limit=540 --max-tasks-per-child=10
     env_file: ./server/app/.env
     depends_on: [redis]
     environment:
       REDIS_URL: redis://redis:6379/0
+      CELERY_WORKER_SEND_TASK_EVENTS: "true"
+      CELERY_TASK_SEND_SENT_EVENT: "true"
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 2G
 
   worker_360p:
     build: ./server/app
-    command: celery -A celery_app worker --loglevel=info --queues=video_processing_360p
+    command: celery -A celery_app worker --loglevel=info --queues=video_processing_360p --time-limit=900 --soft-time-limit=840 --max-tasks-per-child=10
     env_file: ./server/app/.env
     depends_on: [redis]
     environment:
       REDIS_URL: redis://redis:6379/0
+      CELERY_WORKER_SEND_TASK_EVENTS: "true"
+      CELERY_TASK_SEND_SENT_EVENT: "true"
+    deploy:
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 3G
 
   worker_480p:
     build: ./server/app
-    command: celery -A celery_app worker --loglevel=info --queues=video_processing_480p
+    command: celery -A celery_app worker --loglevel=info --queues=video_processing_480p --time-limit=1200 --soft-time-limit=1140 --max-tasks-per-child=10
     env_file: ./server/app/.env
     depends_on: [redis]
     environment:
       REDIS_URL: redis://redis:6379/0
+      CELERY_WORKER_SEND_TASK_EVENTS: "true"
+      CELERY_TASK_SEND_SENT_EVENT: "true"
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 4G
 
   worker_720p:
     build: ./server/app
-    command: celery -A celery_app worker --loglevel=info --queues=video_processing_720p
+    command: celery -A celery_app worker --loglevel=info --queues=video_processing_720p --time-limit=1800 --soft-time-limit=1740 --max-tasks-per-child=5
     env_file: ./server/app/.env
     depends_on: [redis]
     environment:
       REDIS_URL: redis://redis:6379/0
+      CELERY_WORKER_SEND_TASK_EVENTS: "true"
+      CELERY_TASK_SEND_SENT_EVENT: "true"
+    deploy:
+      resources:
+        limits:
+          cpus: '3.0'
+          memory: 6G
 
   worker_1080p:
     build: ./server/app
-    command: celery -A celery_app worker --loglevel=info --queues=video_processing_1080p
+    command: celery -A celery_app worker --loglevel=info --queues=video_processing_1080p --time-limit=3600 --soft-time-limit=3540 --max-tasks-per-child=3 --concurrency=1
     env_file: ./server/app/.env
     depends_on: [redis]
     environment:
       REDIS_URL: redis://redis:6379/0
+      CELERY_WORKER_SEND_TASK_EVENTS: "true"
+      CELERY_TASK_SEND_SENT_EVENT: "true"
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 8G
 
   worker_thumbnail:
     build: ./server/app
-    command: celery -A celery_app worker --loglevel=info --queues=video_processing_thumbnail
+    command: celery -A celery_app worker --loglevel=info --queues=video_processing_thumbnail --time-limit=300 --soft-time-limit=270
     env_file: ./server/app/.env
     depends_on: [redis]
     environment:
       REDIS_URL: redis://redis:6379/0
+      CELERY_WORKER_SEND_TASK_EVENTS: "true"
+      CELERY_TASK_SEND_SENT_EVENT: "true"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 1G
 
   # -----------------------------
   # PROFILE-SPECIFIC KAFKA CONSUMERS (FANOUT)

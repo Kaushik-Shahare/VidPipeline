@@ -2,7 +2,6 @@ from celery import Task
 import json
 import logging
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -12,12 +11,11 @@ class VideoProcessingTask(Task):
     """Video processing task for Celery"""
     name = 'tasks.process_video'
 
-executor = ThreadPoolExecutor(max_workers=2)
-
 
 async def run_ffmpeg_async(func, *args, **kwargs):
+    """Run blocking FFmpeg function in thread pool to avoid blocking event loop."""
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(executor, lambda: func(*args, **kwargs))
+    return await loop.run_in_executor(None, lambda: func(*args, **kwargs))
 
 def create_process_video_task(celery_app):
     """Create the process_video task"""
