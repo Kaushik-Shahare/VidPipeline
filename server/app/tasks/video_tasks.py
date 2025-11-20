@@ -22,7 +22,17 @@ async def run_ffmpeg_async(func, *args, **kwargs):
 def create_process_video_task(celery_app):
     """Create the process_video task"""
     
-    @celery_app.task(base=VideoProcessingTask, bind=True, name='tasks.process_video')
+    @celery_app.task(
+        base=VideoProcessingTask,
+        bind=True,
+        name='tasks.process_video',
+        max_retries=3,
+        default_retry_delay=60,
+        autoretry_for=(Exception,),
+        retry_backoff=True,
+        retry_backoff_max=600,
+        retry_jitter=True
+    )
     def process_video(self, message_data):
         """
         Process video task in Celery worker.
@@ -36,7 +46,7 @@ def create_process_video_task(celery_app):
         
         if not video_hash or not input_path:
             logger.error("Message missing required fields 'video_hash' or 'video_path'")
-            return {"status": "error", "message": "Missing required fields"}
+            raise ValueError("Missing required fields 'video_hash' or 'video_path'")
         
         try:
             # Run the async video processing in a new event loop
@@ -44,13 +54,23 @@ def create_process_video_task(celery_app):
             return result
         except Exception as e:
             logger.exception(f"Error processing video: {e}")
-            return {"status": "error", "message": str(e)}
+            # Re-raise to trigger Celery retry
+            raise
     
     return process_video
 
 
 def create_process_profile_task(celery_app):
-    @celery_app.task(bind=True, name='tasks.process_profile')
+    @celery_app.task(
+        bind=True,
+        name='tasks.process_profile',
+        max_retries=3,
+        default_retry_delay=60,
+        autoretry_for=(Exception,),
+        retry_backoff=True,
+        retry_backoff_max=600,
+        retry_jitter=True
+    )
     def process_profile(self, message_data, profile: str):
         """Process a single profile (e.g., 144p, 360p) — this is intended to be
         enqueued by Kafka consumers running in different consumer groups so work is
@@ -63,21 +83,31 @@ def create_process_profile_task(celery_app):
 
         if not video_hash or not input_path:
             logger.error("Message missing required fields 'video_hash' or 'video_path' for profile task")
-            return {"status": "error", "message": "Missing required fields"}
+            raise ValueError("Missing required fields 'video_hash' or 'video_path' for profile task")
 
         try:
             # Run profile transcode in its own event loop
             result = asyncio.run(_async_process_profile(video_hash, input_path, profile))
             return result
         except Exception as e:
-            logger.exception(f"Error processing profile task: {e}")
-            return {"status": "error", "message": str(e)}
+            logger.exception(f"Error processing profile {profile} task: {e}")
+            # Re-raise to trigger Celery retry
+            raise
 
     return process_profile
 
 
 def create_process_thumbnail_task(celery_app):
-    @celery_app.task(bind=True, name='tasks.process_thumbnail')
+    @celery_app.task(
+        bind=True,
+        name='tasks.process_thumbnail',
+        max_retries=3,
+        default_retry_delay=60,
+        autoretry_for=(Exception,),
+        retry_backoff=True,
+        retry_backoff_max=600,
+        retry_jitter=True
+    )
     def process_thumbnail(self, message_data):
         """Process thumbnail generation as a separate task for fanout."""
         logger.info(f"Processing thumbnail task: {message_data}")
@@ -87,14 +117,15 @@ def create_process_thumbnail_task(celery_app):
 
         if not video_hash or not input_path:
             logger.error("Message missing required fields 'video_hash' or 'video_path' for thumbnail task")
-            return {"status": "error", "message": "Missing required fields"}
+            raise ValueError("Missing required fields 'video_hash' or 'video_path' for thumbnail task")
 
         try:
             result = asyncio.run(_async_process_thumbnail(video_hash, input_path))
             return result
         except Exception as e:
             logger.exception(f"Error processing thumbnail task: {e}")
-            return {"status": "error", "message": str(e)}
+            # Re-raise to trigger Celery retry
+            raise
 
     return process_thumbnail
 
