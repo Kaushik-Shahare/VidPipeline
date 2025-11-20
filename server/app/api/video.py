@@ -1,6 +1,8 @@
 import logging
+import httpx
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
+from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from crud.video import (get_video_by_hash, create_video, get_all_videos)
 from schemas.video import VideoSchema, VideoInitSchema
@@ -120,8 +122,17 @@ async def list_videos(db: AsyncSession = Depends(get_db)):
     for video in videos:
         video_data = VideoSchema.from_orm(video).dict()
 
+        # For HLS streaming, use the proxy endpoint instead of direct Azure URLs
+        # This ensures SAS tokens are properly handled for all playlist/segment requests
+        if video_data.get("hls_url"):
+            # Extract just the path after video_hash (e.g., "hls/master.m3u8")
+            # Original: https://...blob.../videos/{video_hash}/hls/master.m3u8
+            # Proxy:    /videos/stream/{video_hash}/hls/master.m3u8
+            video_data["hls_url"] = f"/videos/stream/{video.video_hash}/hls/master.m3u8"
+        
+        # Still sign other URLs (thumbnail, source) for direct access
         sas_token: str | None = None
-        for field in ("url", "hls_url", "dash_url", "thumbnail_url"):
+        for field in ("url", "dash_url", "thumbnail_url"):
             value = video_data.get(field)
             blob_path = blob_path_from_location(value)
             if not blob_path:
@@ -138,3 +149,51 @@ async def list_videos(db: AsyncSession = Depends(get_db)):
         signed_videos.append(VideoSchema(**video_data))
 
     return signed_videos
+
+
+@router.get("/stream/{video_hash}/{path:path}")
+async def stream_hls_proxy(video_hash: str, path: str, db: AsyncSession = Depends(get_db)):
+    """
+    Proxy endpoint for HLS streaming that automatically appends SAS tokens to Azure Blob requests.
+    This solves the issue where HLS.js can't access variant playlists and segments without authentication.
+    
+    Example: /videos/stream/abc123/hls/1080p/playlist.m3u8
+    """
+    # Verify video exists
+    video = await get_video_by_hash(db, video_hash)
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    
+    # Generate SAS token for this video's container
+    sas_token = generate_container_sas_token()
+    
+    # Build the Azure Blob URL
+    blob_path = f"{video_hash}/{path}"
+    azure_url = signed_url(blob_path, sas_token=sas_token)
+    
+    # Fetch the content from Azure
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(azure_url, timeout=30.0)
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            logger.error(f"Failed to fetch {blob_path}: {exc}")
+            raise HTTPException(status_code=502, detail=f"Failed to fetch content from storage: {exc}")
+    
+    # Determine content type
+    content_type = response.headers.get("Content-Type", "application/octet-stream")
+    
+    # For .m3u8 playlists, ensure correct MIME type
+    if path.endswith(".m3u8"):
+        content_type = "application/vnd.apple.mpegurl"
+    elif path.endswith(".ts"):
+        content_type = "video/mp2t"
+    
+    return Response(
+        content=response.content,
+        media_type=content_type,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Cache-Control": "public, max-age=3600",
+        }
+    )

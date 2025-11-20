@@ -205,8 +205,8 @@ async def _async_process_thumbnail(video_hash: str, input_path: str):
                 
                 await update_video_details(video_hash, {
                     "status": "completed",
-                    "hls_master_url": master_url,
-                    "url": master_url
+                    "hls_url": master_url,
+                    "hls_master_url": master_url
                 }, db)
                 
                 logger.info(f"Master playlist generated via thumbnail completion for {video_hash}")
@@ -283,8 +283,8 @@ async def _async_process_profile(video_hash: str, input_path: str, profile: str)
                 # Update video status to completed and set master URL
                 await update_video_details(video_hash, {
                     "status": "completed",
-                    "hls_master_url": master_url,
-                    "url": master_url
+                    "hls_url": master_url,
+                    "hls_master_url": master_url
                 }, db)
                 
                 logger.info(f"Master playlist generated and uploaded for {video_hash}: {master_url}")
