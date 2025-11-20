@@ -48,7 +48,7 @@ async def send_video_processing_message(video_hash: str, video_path: str):
             await producer.stop()
 
 
-async def consume_video_processing_messages(celery_app):
+async def consume_video_processing_messages(celery_app, group_id: str = None, profile: str = None):
     """
     Consume video processing messages from Kafka and send them to Celery.
     Runs as a standalone service with graceful shutdown support.
@@ -68,18 +68,19 @@ async def consume_video_processing_messages(celery_app):
     signal.signal(signal.SIGTERM, signal_handler)
     
     try:
+        chosen_group = group_id or os.getenv("KAFKA_CONSUMER_GROUP") or f"video_processing_{profile or 'default'}"
         consumer = AIOKafkaConsumer(
             kafka_topic,
             bootstrap_servers=kafka_bootstrap_servers,
             value_deserializer=lambda m: json.loads(m.decode('utf-8')),
-            group_id='video-processing-group',
+            group_id=chosen_group,
             auto_offset_reset='earliest',
             enable_auto_commit=True,
             auto_commit_interval_ms=5000,
         )
         await consumer.start()
         logger.info(f"Kafka consumer started, listening on topic: {kafka_topic}")
-        logger.info(f"Consumer group: video-processing-group")
+        logger.info(f"Consumer group: {chosen_group}")
         
         while not shutdown_event.is_set():
             try:
@@ -102,10 +103,33 @@ async def consume_video_processing_messages(celery_app):
                                 logger.error(f"Invalid message format: {message_data}")
                                 continue
                             
-                            # Send to Celery for processing
-                            from celery_app import process_video
-                            result = process_video.delay(message_data)
-                            logger.info(f"Sent task to Celery for video {video_hash}, task_id: {result.id}")
+                            # If a profile is provided to this consumer, send a profile-specific task
+                            if profile:
+                                logger.info(f"Dispatching profile '{profile}' task for video {video_hash}")
+                                try:
+                                    # Thumbnail gets its own task
+                                    if profile == 'thumbnail':
+                                        result = celery_app.send_task(
+                                            'tasks.process_thumbnail',
+                                            args=[message_data],
+                                            queue='video_processing_thumbnail'
+                                        )
+                                    else:
+                                        # Use a task dedicated to profile-based processing
+                                        result = celery_app.send_task(
+                                            'tasks.process_profile',
+                                            args=[message_data, profile],
+                                            queue=f"video_processing_{profile}"
+                                        )
+                                    logger.info(f"Sent profile task to Celery for video {video_hash}, task_id: {getattr(result, 'id', repr(result))}")
+                                except Exception as e:
+                                    logger.error(f"Failed to enqueue profile task: {e}")
+                                    continue
+                            else:
+                                # Fallback: schedule the original, full processing task
+                                from celery_app import process_video
+                                result = process_video.delay(message_data)
+                                logger.info(f"Sent task to Celery for video {video_hash}, task_id: {result.id}")
                             
                         except Exception as e:
                             logger.error(f"Error processing Kafka message: {e}", exc_info=True)

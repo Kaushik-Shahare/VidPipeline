@@ -81,38 +81,64 @@ services:
         condition: service_healthy
 
   # -----------------------------
-  # MULTIPLE CELERY WORKERS
+  # PROFILE-SPECIFIC CELERY WORKERS
+  # Each worker handles specific profile queues
   # -----------------------------
 
-  worker1:
+  worker_144p:
     build: ./server/app
-    command: celery -A celery_app worker --loglevel=info --queues=video_processing
+    command: celery -A celery_app worker --loglevel=info --queues=video_processing_144p
     env_file: ./server/app/.env
     depends_on: [redis]
     environment:
       REDIS_URL: redis://redis:6379/0
 
-  worker2:
+  worker_360p:
     build: ./server/app
-    command: celery -A celery_app worker --loglevel=info --queues=video_processing
+    command: celery -A celery_app worker --loglevel=info --queues=video_processing_360p
     env_file: ./server/app/.env
     depends_on: [redis]
     environment:
       REDIS_URL: redis://redis:6379/0
 
-  worker3:
+  worker_480p:
     build: ./server/app
-    command: celery -A celery_app worker --loglevel=info --queues=video_processing
+    command: celery -A celery_app worker --loglevel=info --queues=video_processing_480p
+    env_file: ./server/app/.env
+    depends_on: [redis]
+    environment:
+      REDIS_URL: redis://redis:6379/0
+
+  worker_720p:
+    build: ./server/app
+    command: celery -A celery_app worker --loglevel=info --queues=video_processing_720p
+    env_file: ./server/app/.env
+    depends_on: [redis]
+    environment:
+      REDIS_URL: redis://redis:6379/0
+
+  worker_1080p:
+    build: ./server/app
+    command: celery -A celery_app worker --loglevel=info --queues=video_processing_1080p
+    env_file: ./server/app/.env
+    depends_on: [redis]
+    environment:
+      REDIS_URL: redis://redis:6379/0
+
+  worker_thumbnail:
+    build: ./server/app
+    command: celery -A celery_app worker --loglevel=info --queues=video_processing_thumbnail
     env_file: ./server/app/.env
     depends_on: [redis]
     environment:
       REDIS_URL: redis://redis:6379/0
 
   # -----------------------------
-  # MULTIPLE KAFKA CONSUMERS
+  # PROFILE-SPECIFIC KAFKA CONSUMERS (FANOUT)
+  # Each consumer group receives all messages
   # -----------------------------
 
-  consumer1:
+  consumer_144p:
     build: ./server/app
     command: python kafka_consumer_service.py
     env_file: ./server/app/.env
@@ -125,8 +151,10 @@ services:
       REDIS_URL: redis://redis:6379/0
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       KAFKA_VIDEO_TOPIC: video_processing
+      KAFKA_CONSUMER_GROUP: video_processing_144p
+      CONSUMER_PROFILE: 144p
 
-  consumer2:
+  consumer_360p:
     build: ./server/app
     command: python kafka_consumer_service.py
     env_file: ./server/app/.env
@@ -139,6 +167,72 @@ services:
       REDIS_URL: redis://redis:6379/0
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       KAFKA_VIDEO_TOPIC: video_processing
+      KAFKA_CONSUMER_GROUP: video_processing_360p
+      CONSUMER_PROFILE: 360p
+
+  consumer_480p:
+    build: ./server/app
+    command: python kafka_consumer_service.py
+    env_file: ./server/app/.env
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_VIDEO_TOPIC: video_processing
+      KAFKA_CONSUMER_GROUP: video_processing_480p
+      CONSUMER_PROFILE: 480p
+
+  consumer_720p:
+    build: ./server/app
+    command: python kafka_consumer_service.py
+    env_file: ./server/app/.env
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_VIDEO_TOPIC: video_processing
+      KAFKA_CONSUMER_GROUP: video_processing_720p
+      CONSUMER_PROFILE: 720p
+
+  consumer_1080p:
+    build: ./server/app
+    command: python kafka_consumer_service.py
+    env_file: ./server/app/.env
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_VIDEO_TOPIC: video_processing
+      KAFKA_CONSUMER_GROUP: video_processing_1080p
+      CONSUMER_PROFILE: 1080p
+
+  consumer_thumbnail:
+    build: ./server/app
+    command: python kafka_consumer_service.py
+    env_file: ./server/app/.env
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_VIDEO_TOPIC: video_processing
+      KAFKA_CONSUMER_GROUP: video_processing_thumbnail
+      CONSUMER_PROFILE: thumbnail
 
   # Flower UI
   flower:
@@ -150,9 +244,12 @@ services:
       CELERY_RESULT_BACKEND: redis://redis:6379/0
     depends_on:
       - redis
-      - worker1
-      - worker2
-      - worker3
+      - worker_144p
+      - worker_360p
+      - worker_480p
+      - worker_720p
+      - worker_1080p
+      - worker_thumbnail
 
   # -----------------------------
   # MONITORING: GRAFANA + PROMETHEUS + LOKI

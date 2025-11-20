@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, func, DateTime
+from sqlalchemy import Column, Integer, String, ForeignKey, func, DateTime, Boolean
 from core.database import Base
 
 class Video(Base):
@@ -15,6 +15,16 @@ class Video(Base):
     hls_url = Column(String, unique=True, index=False, nullable=True)
     dash_url = Column(String, unique=True, index=False, nullable=True)
     thumbnail_url = Column(String, unique=True, index=False, nullable=True)
+    hls_master_url = Column(String, unique=True, index=False, nullable=True)
+    
+    # Profile completion tracking
+    profile_144p_done = Column(Boolean, default=False, nullable=False)
+    profile_360p_done = Column(Boolean, default=False, nullable=False)
+    profile_480p_done = Column(Boolean, default=False, nullable=False)
+    profile_720p_done = Column(Boolean, default=False, nullable=False)
+    profile_1080p_done = Column(Boolean, default=False, nullable=False)
+    thumbnail_done = Column(Boolean, default=False, nullable=False)
+    
     created_at = Column(DateTime, server_default=func.now(), index=False, nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), index=False, nullable=False)
 

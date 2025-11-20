@@ -49,6 +49,233 @@ def create_process_video_task(celery_app):
     return process_video
 
 
+def create_process_profile_task(celery_app):
+    @celery_app.task(bind=True, name='tasks.process_profile')
+    def process_profile(self, message_data, profile: str):
+        """Process a single profile (e.g., 144p, 360p) — this is intended to be
+        enqueued by Kafka consumers running in different consumer groups so work is
+        distributed across workers.
+        """
+        logger.info(f"Processing profile task: profile={profile}, data={message_data}")
+
+        video_hash = message_data.get('video_hash')
+        input_path = message_data.get('video_path')
+
+        if not video_hash or not input_path:
+            logger.error("Message missing required fields 'video_hash' or 'video_path' for profile task")
+            return {"status": "error", "message": "Missing required fields"}
+
+        try:
+            # Run profile transcode in its own event loop
+            result = asyncio.run(_async_process_profile(video_hash, input_path, profile))
+            return result
+        except Exception as e:
+            logger.exception(f"Error processing profile task: {e}")
+            return {"status": "error", "message": str(e)}
+
+    return process_profile
+
+
+def create_process_thumbnail_task(celery_app):
+    @celery_app.task(bind=True, name='tasks.process_thumbnail')
+    def process_thumbnail(self, message_data):
+        """Process thumbnail generation as a separate task for fanout."""
+        logger.info(f"Processing thumbnail task: {message_data}")
+
+        video_hash = message_data.get('video_hash')
+        input_path = message_data.get('video_path')
+
+        if not video_hash or not input_path:
+            logger.error("Message missing required fields 'video_hash' or 'video_path' for thumbnail task")
+            return {"status": "error", "message": "Missing required fields"}
+
+        try:
+            result = asyncio.run(_async_process_thumbnail(video_hash, input_path))
+            return result
+        except Exception as e:
+            logger.exception(f"Error processing thumbnail task: {e}")
+            return {"status": "error", "message": str(e)}
+
+    return process_thumbnail
+
+
+async def _async_process_thumbnail(video_hash: str, input_path: str):
+    """Generate thumbnail for video."""
+    import sys
+    import os
+
+    app_dir = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
+    if app_dir not in sys.path:
+        sys.path.insert(0, app_dir)
+
+    from utils.azure_blob import download_video_blob, upload_directory
+    from utils.ffmpeg_util import video_thumbnail
+    from crud.video import mark_profile_complete, update_video_details
+    from core.database import AsyncSessionLocal
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    # Ensure local copy exists
+    local_dir = os.path.join(app_dir, 'media', 'uploads', video_hash)
+    os.makedirs(local_dir, exist_ok=True)
+    local_input_path = os.path.join(local_dir, 'source.mp4')
+
+    if not os.path.exists(local_input_path) or os.path.getsize(local_input_path) == 0:
+        await run_ffmpeg_async(download_video_blob, video_hash, local_input_path)
+
+    # Generate thumbnail
+    try:
+        thumbnail_path = await run_ffmpeg_async(video_thumbnail, local_input_path, local_dir)
+        logger.info(f"Thumbnail generated for {video_hash}: {thumbnail_path}")
+        
+        # Upload thumbnail
+        thumbnail_file = os.path.basename(thumbnail_path)
+        uploaded = upload_directory(video_hash, local_dir, dest_prefix="", exclude=['source.mp4', 'hls', 'dash'])
+        
+        # Get thumbnail URL
+        thumbnail_info = uploaded.get(thumbnail_file, {})
+        thumbnail_url = thumbnail_info.get("url") if isinstance(thumbnail_info, dict) else None
+        
+        logger.info(f"Thumbnail uploaded for {video_hash}: {thumbnail_url}")
+    except Exception as e:
+        logger.exception(f"Failed to generate/upload thumbnail for {video_hash}: {e}")
+        raise
+
+    # Mark thumbnail as complete
+    async with AsyncSessionLocal() as db:
+        video, all_done = await mark_profile_complete(video_hash, 'thumbnail', db)
+        
+        # Update thumbnail URL
+        await update_video_details(video_hash, {
+            "thumbnail_url": thumbnail_url
+        }, db)
+        
+        if all_done:
+            logger.info(f"Thumbnail was the last task for {video_hash}, triggering master generation...")
+            # Note: Master generation should happen in profile completion, but check here too
+            from utils.ffmpeg_util import generate_hls_master_playlist
+            try:
+                master_path = await run_ffmpeg_async(
+                    generate_hls_master_playlist,
+                    local_dir,
+                    ['144p', '360p', '480p', '720p', '1080p']
+                )
+                
+                master_dir = os.path.join(local_dir, 'hls')
+                master_uploaded = upload_directory(
+                    video_hash,
+                    master_dir,
+                    dest_prefix="hls",
+                    exclude=['144p', '360p', '480p', '720p', '1080p']
+                )
+                
+                master_rel = "hls/master.m3u8"
+                master_info = master_uploaded.get("master.m3u8", {})
+                master_url = master_info.get("url") if isinstance(master_info, dict) else None
+                
+                await update_video_details(video_hash, {
+                    "status": "completed",
+                    "hls_master_url": master_url,
+                    "url": master_url
+                }, db)
+                
+                logger.info(f"Master playlist generated via thumbnail completion for {video_hash}")
+            except Exception as e:
+                logger.warning(f"Master might already be generated for {video_hash}: {e}")
+
+    return {"status": "completed", "video_hash": video_hash, "thumbnail_url": thumbnail_url}
+
+
+async def _async_process_profile(video_hash: str, input_path: str, profile: str):
+    """Async wrapper to process a specific HLS profile and upload results."""
+    import sys
+    import os
+
+    app_dir = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
+    if app_dir not in sys.path:
+        sys.path.insert(0, app_dir)
+
+    from utils.azure_blob import download_video_blob, upload_directory
+    from utils.ffmpeg_util import transcode_hls_profile, generate_hls_master_playlist
+    from crud.video import mark_profile_complete, update_video_details
+    from core.database import AsyncSessionLocal
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    # Ensure local copy exists
+    local_dir = os.path.join(app_dir, 'media', 'uploads', video_hash)
+    os.makedirs(local_dir, exist_ok=True)
+    local_input_path = os.path.join(local_dir, 'source.mp4')
+
+    if not os.path.exists(local_input_path) or os.path.getsize(local_input_path) == 0:
+        # download the original source
+        await run_ffmpeg_async(download_video_blob, video_hash, local_input_path)
+
+    # Perform profile-specific transcode
+    try:
+        playlist_path = await run_ffmpeg_async(transcode_hls_profile, local_input_path, local_dir, profile)
+        # Upload this profile directory to blob storage under video_hash/hls/{profile}
+        uploaded = upload_directory(video_hash, os.path.join(local_dir, 'hls', profile), dest_prefix=f"hls/{profile}")
+        logger.info(f"Uploaded profile {profile} assets for {video_hash}: {uploaded}")
+    except Exception as e:
+        logger.exception(f"Failed to transcode/upload profile {profile} for {video_hash}: {e}")
+        raise
+
+    # Mark this profile as complete in the database
+    async with AsyncSessionLocal() as db:
+        video, all_done = await mark_profile_complete(video_hash, profile, db)
+        
+        if all_done:
+            logger.info(f"All profiles completed for {video_hash}. Generating master playlist...")
+            try:
+                # Generate master playlist
+                master_path = await run_ffmpeg_async(
+                    generate_hls_master_playlist,
+                    local_dir,
+                    ['144p', '360p', '480p', '720p', '1080p']
+                )
+                
+                # Upload master playlist
+                master_dir = os.path.join(local_dir, 'hls')
+                master_uploaded = upload_directory(
+                    video_hash,
+                    master_dir,
+                    dest_prefix="hls",
+                    exclude=['144p', '360p', '480p', '720p', '1080p']  # Only upload master.m3u8
+                )
+                
+                # Get master playlist URL
+                master_rel = "hls/master.m3u8"
+                master_info = master_uploaded.get("master.m3u8", {})
+                master_url = master_info.get("url") if isinstance(master_info, dict) else None
+                
+                # Update video status to completed and set master URL
+                await update_video_details(video_hash, {
+                    "status": "completed",
+                    "hls_master_url": master_url,
+                    "url": master_url
+                }, db)
+                
+                logger.info(f"Master playlist generated and uploaded for {video_hash}: {master_url}")
+                
+                # Cleanup local files after everything is done
+                try:
+                    import shutil
+                    shutil.rmtree(local_dir, ignore_errors=False)
+                    logger.info(f"Deleted local directory for {video_hash}: {local_dir}")
+                except Exception as cleanup_err:
+                    logger.warning(f"Could not delete local directory {local_dir}: {cleanup_err}")
+                    
+            except Exception as e:
+                logger.exception(f"Failed to generate/upload master playlist for {video_hash}: {e}")
+        else:
+            logger.info(f"Profile {profile} completed for {video_hash}, waiting for other profiles...")
+
+    return {"status": "completed", "video_hash": video_hash, "profile": profile, "all_done": all_done}
+
+
 async def _async_process_video(video_hash: str, input_path: str):
     """Internal async function to process video"""
     import sys
@@ -84,10 +311,7 @@ async def _async_process_video(video_hash: str, input_path: str):
     
     # Process video
     hls_path = await run_ffmpeg_async(transcode_to_hls, local_input_path, output_dir)
-    logger.info(f"Transcoding to DASH for video {video_hash}")
-    
-    dash_path = await run_ffmpeg_async(transcode_to_dash, local_input_path, output_dir)
-    logger.info(f"Transcoding completed for {video_hash}")
+    logger.info(f"Skipping DASH transcoding (disabled in config) for video {video_hash}")
     
     thumbnail_path = await run_ffmpeg_async(video_thumbnail, local_input_path, output_dir)
     logger.info(f"Thumbnail Generation Completed for video_hash {video_hash}")
@@ -115,7 +339,6 @@ async def _async_process_video(video_hash: str, input_path: str):
         return os.path.relpath(path, output_dir).replace("\\", "/")
 
     hls_rel = to_rel(hls_path)
-    dash_rel = to_rel(dash_path)
     thumbnail_rel = to_rel(thumbnail_path)
 
     # Update database
@@ -144,7 +367,7 @@ async def _async_process_video(video_hash: str, input_path: str):
         return to_web_path(fallback_path)
 
     hls_url = lookup_uploaded_url(hls_rel, hls_path)
-    dash_url = lookup_uploaded_url(dash_rel, dash_path)
+    dash_url = None
     thumbnail_url = lookup_uploaded_url(thumbnail_rel, thumbnail_path)
     
     # Log the URLs for debugging

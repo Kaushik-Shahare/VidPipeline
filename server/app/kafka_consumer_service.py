@@ -4,6 +4,7 @@ Deploy as a separate Kubernetes deployment with replicas=1
 """
 import asyncio
 import logging
+import os
 from utils.kafka import consume_video_processing_messages
 from celery_app import celery_app
 
@@ -25,7 +26,11 @@ async def main():
     logger.info(f"Connecting to Kafka and Redis...")
     
     try:
-        await consume_video_processing_messages(celery_app)
+        # Read optional consumer group and profile from environment so this single
+        # service can be deployed multiple times with different group/profile
+        consumer_group = os.getenv("KAFKA_CONSUMER_GROUP")
+        consumer_profile = os.getenv("CONSUMER_PROFILE")
+        await consume_video_processing_messages(celery_app, group_id=consumer_group, profile=consumer_profile)
     except KeyboardInterrupt:
         logger.info("Kafka consumer service shutting down...")
     except Exception as e:

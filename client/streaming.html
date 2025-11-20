@@ -40,7 +40,6 @@
         height: 24px;
         background: #ff3d00;
         border-radius: 6px;
-        display: inline-block;
       }
       .watch {
         display: grid;
@@ -54,10 +53,25 @@
         border-radius: 10px;
         overflow: hidden;
       }
+      .quality-box {
+        margin-top: 10px;
+        padding: 10px;
+        display: inline-block;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+      }
+      select {
+        background: #111;
+        border: 1px solid var(--border);
+        padding: 6px 10px;
+        border-radius: 6px;
+        color: var(--text);
+      }
       .title {
         font-weight: 700;
         font-size: 18px;
-        margin: 10px 0;
+        margin: 12px 0 4px 0;
       }
       .meta {
         color: var(--muted);
@@ -79,14 +93,6 @@
         height: auto;
         display: block;
       }
-      .pill {
-        display: inline-block;
-        padding: 6px 10px;
-        border: 1px solid var(--border);
-        border-radius: 999px;
-        color: var(--muted);
-        font-size: 12px;
-      }
       .upnext-item {
         display: flex;
         align-items: center;
@@ -102,86 +108,72 @@
         border-radius: 6px;
         border: 1px solid var(--border);
       }
-      .upnext-item span {
-        font-size: 14px;
-        flex: 1;
-      }
     </style>
+
     <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
-    <script src="https://cdn.dashjs.org/latest/dash.all.min.js"></script>
   </head>
   <body>
     <header class="header">
       <span class="logo-badge"></span>
       <span>VidPipeline</span>
     </header>
+
     <main class="watch">
       <section>
         <div id="player" class="player">
           <video id="videoEl" controls playsinline></video>
         </div>
+
+        <!-- Always-visible Quality Selector -->
+        <div class="quality-box">
+          <label
+            style="font-size: 12px; color: var(--muted); margin-right: 6px"
+          >
+            Quality:
+          </label>
+          <select id="qualitySelect">
+            <option value="-1">Auto</option>
+          </select>
+        </div>
+
         <div id="videoTitle" class="title"></div>
         <div id="videoMeta" class="meta"></div>
-        <div class="stack" style="margin-top: 12px">
-          <span class="pill">HLS</span>
-          <span class="pill">DASH</span>
-        </div>
       </section>
+
       <aside class="panel">
         <div style="font-weight: 700; margin-bottom: 8px">Up Next</div>
         <div id="upnext" class="stack"></div>
       </aside>
     </main>
+
     <script>
       const BACKEND_URL = "http://localhost:8000";
+      const qualitySelect = document.getElementById("qualitySelect");
+
+      let hlsInstance = null;
 
       function isAbsoluteUrl(u) {
         return typeof u === "string" && /^(https?:)?\/\//i.test(u);
       }
-
       function resolveUrl(u) {
-        if (!u) return null;
         return isAbsoluteUrl(u) ? u : `${BACKEND_URL}${u}`;
       }
-
       function hasSasQuery(u) {
-        return typeof u === "string" && /[?&]sig=/i.test(u);
+        return /[?&]sig=/i.test(u);
       }
-
       function normalizeToken(token) {
-        if (!token) return "";
-        return token.startsWith("?") ? token.slice(1) : token;
+        return token ? token.replace(/^\?/, "") : "";
       }
-
       function appendSas(url, token) {
-        if (!token || !url || hasSasQuery(url) || !isAbsoluteUrl(url)) return url;
-        const separator = url.includes("?") ? "&" : "?";
-        return `${url}${separator}${token}`;
+        if (!token || hasSasQuery(url) || !isAbsoluteUrl(url)) return url;
+        return url + (url.includes("?") ? "&" : "?") + token;
       }
 
-      function createHlsLoader(token, originHint) {
-        if (!token) return Hls.DefaultConfig.loader;
-        const baseLoader = Hls.DefaultConfig.loader;
-
-        return class TokenLoader extends baseLoader {
-          constructor(config) {
-            super(config);
-          }
-
-          load(context, config, callbacks) {
-            if (context && typeof context.url === "string") {
-              const shouldAppend =
-                (!originHint || context.url.startsWith(originHint)) &&
-                !hasSasQuery(context.url) &&
-                isAbsoluteUrl(context.url);
-              if (shouldAppend) {
-                context.url = appendSas(context.url, token);
-              }
-            }
-            super.load(context, config, callbacks);
-          }
-        };
+      async function fetchVideos() {
+        const resp = await fetch(`${BACKEND_URL}/videos`);
+        return await resp.json();
       }
+
       const urlParams = new URLSearchParams(window.location.search);
       const vhash = urlParams.get("v");
 
@@ -190,14 +182,9 @@
       const metaEl = document.getElementById("videoMeta");
       const upnextEl = document.getElementById("upnext");
 
-      async function fetchVideos() {
-        const resp = await fetch(`${BACKEND_URL}/videos`);
-        return await resp.json();
-      }
-
       function pickVideo(videos) {
         if (!vhash) return videos[0];
-        return videos.find((x) => x.video_hash === vhash) || videos[0];
+        return videos.find((v) => v.video_hash === vhash) || videos[0];
       }
 
       function renderUpNext(videos, current) {
@@ -224,46 +211,46 @@
           });
       }
 
+      function setupHlsQuality(hls) {
+        hls.on(Hls.Events.MANIFEST_PARSED, () => {
+          qualitySelect.innerHTML = `<option value="-1">Auto</option>`;
+
+          hls.levels.forEach((lvl, index) => {
+            const opt = document.createElement("option");
+            opt.value = index;
+            opt.textContent = `${lvl.height}p`;
+            qualitySelect.appendChild(opt);
+          });
+
+          qualitySelect.onchange = () => {
+            const level = parseInt(qualitySelect.value);
+            hls.currentLevel = level;
+          };
+        });
+      }
+
       function playVideo(video) {
         titleEl.textContent = video.title || "Untitled";
         metaEl.textContent = video.status;
-        const sasToken = normalizeToken(video.azure_sas_token);
-        if (video.hls_url) {
-          const hlsSrc = resolveUrl(video.hls_url);
-          if (Hls.isSupported()) {
-            let originHint = null;
-            try {
-              originHint = hlsSrc ? new URL(hlsSrc).origin : null;
-            } catch (_) {
-              originHint = null;
-            }
 
-            const hlsConfig = {};
-            if (sasToken) {
-              hlsConfig.loader = createHlsLoader(sasToken, originHint);
-            }
-            const hls = new Hls(hlsConfig);
-            hls.loadSource(appendSas(hlsSrc, sasToken));
-            hls.attachMedia(videoEl);
-          } else if (videoEl.canPlayType("application/vnd.apple.mpegurl")) {
-            videoEl.src = appendSas(hlsSrc, sasToken);
+        const token = normalizeToken(video.azure_sas_token);
+
+        if (hlsInstance) {
+          hlsInstance.destroy();
+          hlsInstance = null;
+        }
+
+        if (video.hls_url) {
+          const src = appendSas(resolveUrl(video.hls_url), token);
+
+          if (Hls.isSupported()) {
+            hlsInstance = new Hls();
+            hlsInstance.loadSource(src);
+            hlsInstance.attachMedia(videoEl);
+            setupHlsQuality(hlsInstance);
+          } else {
+            videoEl.src = src;
           }
-        } else if (video.dash_url) {
-          const dashSrc = resolveUrl(video.dash_url);
-          const player = dashjs.MediaPlayer().create();
-          if (sasToken) {
-            player.extend(
-              "RequestModifier",
-              function () {
-                return {
-                  modifyRequestHeader: (xhr) => xhr,
-                  modifyRequestURL: (url) => appendSas(url, sasToken),
-                };
-              },
-              true
-            );
-          }
-          player.initialize(videoEl, appendSas(dashSrc, sasToken), true);
         }
       }
 
@@ -273,6 +260,7 @@
           titleEl.textContent = "No videos yet";
           return;
         }
+
         const current = pickVideo(videos);
         renderUpNext(videos, current);
         playVideo(current);
