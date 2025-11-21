@@ -15,9 +15,12 @@ from utils.azure_blob import (
     blob_path_from_location,
     generate_container_sas_token,
     get_uploaded_chunks,
+    download_video_blob,
 )
 
 router = APIRouter(prefix="/videos", tags=["videos"])
+
+logger = logging.getLogger(__name__)
 
 logger = logging.getLogger(__name__)
 
@@ -157,13 +160,14 @@ async def upload_chunk(
 
 @router.post("/finalize/{video_hash}")
 async def upload_video_finalize(video_hash: str, db: AsyncSession = Depends(get_db)):
-    """Finalize video upload by merging all chunks into source.mp4 and starting processing.
+    """Finalize video upload by merging all chunks and starting preprocessing.
     
     This endpoint:
     1. Verifies all chunks have been uploaded
     2. Merges chunks into source.mp4 in Azure
-    3. Updates video status to 'processing'
-    4. Triggers Kafka fanout for transcoding
+    3. Extracts video metadata (dimensions, codec, etc.)
+    4. Updates video status to 'preprocessing'
+    5. Triggers preprocessing task (compression + virus scan)
     """
     # Check the video hash
     video = await get_video_by_hash(db, video_hash)
@@ -188,18 +192,32 @@ async def upload_video_finalize(video_hash: str, db: AsyncSession = Depends(get_
         raise HTTPException(status_code=500, detail=f"Failed to merge chunks: {str(e)}")
 
     # Update video status and URL
-    video.status = "processing"
+    # Metadata extraction will be done in preprocessing task (avoids double download)
+    video.status = "preprocessing"
     video.url = blob_url
+    
     await db.commit()
     await db.refresh(video)
 
-    # Trigger async processing via Kafka (non-blocking)
-    await send_video_processing_message(video_hash, f"{video_hash}/source.mp4")
+    # Trigger preprocessing via Kafka (compression + virus scan)
+    # Send to video_preprocessing topic which will be consumed by preprocessing workers
+    from utils.kafka import send_kafka_message
+    
+    await send_kafka_message(
+        topic='video_preprocessing',
+        message={
+            'video_hash': video_hash,
+            'video_path': f"{video_hash}/source.mp4"
+        }
+    )
+    
+    logger.info(f"Sent video {video_hash} to video_preprocessing topic")
     
     return {
-        "message": "Video upload finalized and processing started", 
+        "message": "Video upload finalized and preprocessing started", 
         "video_hash": video_hash, 
-        "video_url": video.url
+        "video_url": video.url,
+        "status": "preprocessing"
     }
 
 

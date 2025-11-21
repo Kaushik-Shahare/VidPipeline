@@ -6,6 +6,179 @@ import json
 
 logging.basicConfig(level=logging.INFO, filename='logs/ffmpeg.log')
 
+
+def extract_video_metadata(video_path: str) -> dict:
+    """Extract video metadata using ffprobe.
+    
+    Returns dictionary with:
+    - width: int - Video width in pixels
+    - height: int - Video height in pixels  
+    - duration: float - Duration in seconds
+    - codec: str - Video codec name (e.g., 'h264', 'hevc')
+    - format: str - Container format (e.g., 'mov,mp4,m4a,3gp,3g2,mj2')
+    - mime_type: str - Detected MIME type (e.g., 'video/mp4')
+    - bit_rate: int - Overall bit rate in bits/s
+    
+    Raises:
+        RuntimeError: If ffprobe fails or video is invalid
+    """
+    logger = logging.getLogger(__name__)
+    
+    try:
+        # Run ffprobe to get JSON metadata
+        probe = ffmpeg.probe(video_path)
+        
+        # Get video stream (first video stream)
+        video_stream = next(
+            (stream for stream in probe['streams'] if stream['codec_type'] == 'video'),
+            None
+        )
+        
+        if not video_stream:
+            raise RuntimeError("No video stream found in file")
+        
+        # Extract format info
+        format_info = probe.get('format', {})
+        
+        # Map format to MIME type
+        format_name = format_info.get('format_name', '').lower()
+        mime_type_map = {
+            'mov,mp4,m4a,3gp,3g2,mj2': 'video/mp4',
+            'matroska,webm': 'video/x-matroska',
+            'avi': 'video/x-msvideo',
+            'webm': 'video/webm',
+            'mpeg': 'video/mpeg',
+            'quicktime': 'video/quicktime',
+        }
+        
+        mime_type = 'video/mp4'  # default
+        for fmt_key, mime in mime_type_map.items():
+            if fmt_key in format_name:
+                mime_type = mime
+                break
+        
+        metadata = {
+            'width': int(video_stream.get('width', 0)),
+            'height': int(video_stream.get('height', 0)),
+            'duration': float(format_info.get('duration', 0)),
+            'codec': video_stream.get('codec_name', 'unknown'),
+            'format': format_name,
+            'mime_type': mime_type,
+            'bit_rate': int(format_info.get('bit_rate', 0)),
+        }
+        
+        logger.info(f"Extracted metadata from {video_path}: {metadata}")
+        return metadata
+        
+    except ffmpeg.Error as e:
+        stderr = e.stderr.decode() if e.stderr else str(e)
+        logger.error(f"ffprobe failed for {video_path}: {stderr}")
+        raise RuntimeError(f"Failed to extract video metadata: {stderr}") from e
+    except Exception as e:
+        logger.error(f"Metadata extraction failed for {video_path}: {e}")
+        raise RuntimeError(f"Failed to extract video metadata: {str(e)}") from e
+
+
+def compress_video(input_path: str, output_path: str, target_bitrate: str = '2500k') -> dict:
+    """Compress video using ffmpeg with efficient H.264 encoding.
+    
+    This reduces file size while maintaining acceptable quality.
+    Useful for reducing storage costs and processing time.
+    
+    Args:
+        input_path: Path to input video file
+        output_path: Path to save compressed video
+        target_bitrate: Target video bitrate (e.g., '2500k', '5000k')
+                       Lower = smaller file, lower quality
+                       
+    Returns:
+        dict with compression stats:
+        - original_size: int - Original file size in bytes
+        - compressed_size: int - Compressed file size in bytes
+        - compression_ratio: float - Ratio (e.g., 0.65 = 65% of original)
+        - saved_bytes: int - Bytes saved
+        
+    Raises:
+        RuntimeError: If compression fails
+    """
+    logger = logging.getLogger(__name__)
+    logger.info(f"Compressing video: {input_path} -> {output_path} (target bitrate: {target_bitrate})")
+    
+    if not os.path.exists(input_path):
+        raise FileNotFoundError(f"Input file not found: {input_path}")
+    
+    original_size = os.path.getsize(input_path)
+    
+    try:
+        # Use ffmpeg to compress with H.264
+        # Fast preset for quick compression before heavy transcoding
+        cmd = (
+            ffmpeg
+            .input(input_path)
+            .output(
+                output_path,
+                **{
+                    'c:v': 'libx264',
+                    'preset': 'veryfast',  # Much faster encoding (was 'medium')
+                    'crf': '28',  # Higher CRF = lower quality but faster (was 23)
+                    'b:v': target_bitrate,
+                    'maxrate': target_bitrate,
+                    'c:a': 'aac',
+                    'b:a': '128k',
+                    'movflags': '+faststart',  # Enable streaming
+                    'threads': '0'  # Use all available cores
+                }
+            )
+            .overwrite_output()
+            .compile()
+        )
+        
+        logger.info(f"Running compression: {' '.join(cmd)}")
+        
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True
+        )
+        
+        # Wait for compression with timeout (max 45 minutes to match Celery limit)
+        try:
+            stdout, stderr = process.communicate(timeout=2700)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            stdout, stderr = process.communicate()
+            raise RuntimeError("Video compression timed out after 45 minutes")
+        
+        if process.returncode != 0:
+            logger.error(f"FFmpeg compression failed:\nSTDERR:\n{stderr}")
+            raise RuntimeError(f"Video compression failed: {stderr}")
+        
+        # Calculate compression stats
+        compressed_size = os.path.getsize(output_path)
+        compression_ratio = compressed_size / original_size
+        saved_bytes = original_size - compressed_size
+        
+        stats = {
+            'original_size': original_size,
+            'compressed_size': compressed_size,
+            'compression_ratio': round(compression_ratio, 3),
+            'saved_bytes': saved_bytes,
+            'saved_mb': round(saved_bytes / (1024 * 1024), 2),
+            'compression_percent': round((1 - compression_ratio) * 100, 1)
+        }
+        
+        logger.info(f"Compression complete: {stats}")
+        return stats
+        
+    except Exception as e:
+        logger.error(f"Video compression failed: {e}")
+        # Clean up output file if it exists
+        if os.path.exists(output_path):
+            os.unlink(output_path)
+        raise RuntimeError(f"Video compression failed: {str(e)}") from e
+
+
 def transcode_hls_profile(input_file, output_dir, profile: str):
     """Transcode a single HLS variant (profile) into a profile-specific folder.
 

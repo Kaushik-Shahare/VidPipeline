@@ -81,6 +81,30 @@ services:
         condition: service_healthy
 
   # -----------------------------
+  # PREPROCESSING WORKER
+  # Handles compression and virus scanning
+  # -----------------------------
+
+  worker_preprocessing:
+    build: ./server/app
+    command: celery -A celery_app worker --loglevel=info --queues=preprocessing --time-limit=3000 --soft-time-limit=2940 --max-tasks-per-child=5 --concurrency=1
+    env_file: ./server/app/.env
+    depends_on: 
+      - redis
+      - kafka
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      CELERY_WORKER_SEND_TASK_EVENTS: "true"
+      CELERY_TASK_SEND_SENT_EVENT: "true"
+      PYTHONPATH: /app
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 6G
+
+  # -----------------------------
   # PROFILE-SPECIFIC CELERY WORKERS
   # Each worker handles specific profile queues
   # -----------------------------
@@ -174,6 +198,27 @@ services:
         limits:
           cpus: '0.5'
           memory: 1G
+
+  # -----------------------------
+  # PREPROCESSING KAFKA CONSUMER
+  # Consumes from video_preprocessing topic
+  # -----------------------------
+
+  consumer_preprocessing:
+    build: ./server/app
+    command: python kafka_preprocessing_consumer.py
+    env_file: ./server/app/.env
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_PREPROCESSING_TOPIC: video_preprocessing
+      KAFKA_CONSUMER_GROUP: video_preprocessing_consumer
+      PYTHONPATH: /app
 
   # -----------------------------
   # PROFILE-SPECIFIC KAFKA CONSUMERS (FANOUT)

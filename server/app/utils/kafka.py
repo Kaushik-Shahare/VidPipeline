@@ -14,14 +14,13 @@ kafka_bootstrap_servers = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 kafka_topic = os.getenv("KAFKA_VIDEO_TOPIC", "video-processing")
 
 
-async def send_video_processing_message(video_hash: str, video_path: str):
+async def send_kafka_message(topic: str, message: dict):
     """
-    Send a video processing message to Kafka.
-    This will be consumed by the Kafka consumer service.
+    Send a message to a specific Kafka topic.
     
     Args:
-        video_hash: The hash of the video
-        video_path: Location of the uploaded video (Azure blob name)
+        topic: The Kafka topic to send to
+        message: Dictionary containing the message data
     """
     producer = None
     try:
@@ -31,21 +30,34 @@ async def send_video_processing_message(video_hash: str, video_path: str):
         )
         await producer.start()
         
-        message = {
-            'video_hash': video_hash,
-            'video_path': video_path
-        }
-        
-        logger.info(f"Sending video processing message to Kafka: {message}")
-        await producer.send_and_wait(kafka_topic, message)
-        logger.info(f"Successfully sent message to Kafka for video {video_hash}")
+        logger.info(f"Sending message to Kafka topic '{topic}': {message}")
+        await producer.send_and_wait(topic, message)
+        logger.info(f"Successfully sent message to Kafka topic '{topic}'")
         
     except Exception as e:
-        logger.error(f"Failed to send message to Kafka: {e}")
+        logger.error(f"Failed to send message to Kafka topic '{topic}': {e}")
         raise
     finally:
         if producer:
             await producer.stop()
+
+
+async def send_video_processing_message(video_hash: str, video_path: str):
+    """
+    Send a video processing message to Kafka.
+    This will be consumed by the Kafka consumer service.
+    
+    Args:
+        video_hash: The hash of the video
+        video_path: Location of the uploaded video (Azure blob name)
+    """
+    await send_kafka_message(
+        topic=kafka_topic,
+        message={
+            'video_hash': video_hash,
+            'video_path': video_path
+        }
+    )
 
 
 async def consume_video_processing_messages(celery_app, group_id: str = None, profile: str = None):

@@ -19,6 +19,7 @@ VidPipeline demonstrates a production-grade distributed video transcoding pipeli
 
 ## Key Features
 
+- **Video Preprocessing** - ClamAV virus scanning and H.264 compression before transcoding
 - **Parallel Profile Processing** - All resolutions transcode simultaneously  
 - **Fanout Pattern** - Kafka consumer groups enable true parallel consumption  
 - **Coordinated Completion** - Master playlist generated only when all profiles finish  
@@ -29,13 +30,20 @@ VidPipeline demonstrates a production-grade distributed video transcoding pipeli
 **Message Flow**
 
 1. User uploads video chunks → finalize upload
-2. FastAPI sends single message to Kafka topic `video_processing`
-3. **6 consumer groups** (144p, 360p, 480p, 720p, 1080p, thumbnail) each receive the message (fanout)
-4. Each consumer sends profile-specific Celery task to dedicated queue
-5. FFmpeg workers transcode assigned profiles in parallel
-6. Each completed profile marks database column as `TRUE`
-7. Last profile to finish checks if all done → generates `master.m3u8`
-8. Video status updated to `completed`
+2. FastAPI sends message to Kafka topic `video_preprocessing`
+3. **Preprocessing worker** receives message:
+   - Downloads video from Azure
+   - Scans for viruses with ClamAV (blocks infected files)
+   - Compresses video (H.264, veryfast preset for speed)
+   - Extracts metadata (resolution, duration, codec)
+   - Uploads compressed version
+   - Sends message to `video_processing` topic
+4. **6 consumer groups** (144p, 360p, 480p, 720p, 1080p, thumbnail) each receive the message (fanout)
+5. Each consumer sends profile-specific Celery task to dedicated queue
+6. FFmpeg workers transcode assigned profiles in parallel
+7. Each completed profile marks database column as `TRUE`
+8. Last profile to finish checks if all done → generates `master.m3u8`
+9. Video status updated to `completed`
 
 All processing is async, distributed, and decoupled.
 
@@ -81,7 +89,14 @@ CREATE TABLE videos (
     id INTEGER PRIMARY KEY,
     video_hash VARCHAR UNIQUE,
     title VARCHAR,
-    status VARCHAR,  -- 'uploading', 'processing', 'completed'
+    status VARCHAR,  -- 'uploading', 'preprocessing', 'processing', 'completed', 'failed'
+    
+    -- Video metadata (extracted during preprocessing)
+    width INTEGER,
+    height INTEGER,
+    duration INTEGER,
+    codec VARCHAR,
+    actual_mime_type VARCHAR,
     
     -- Profile completion tracking
     profile_144p_done BOOLEAN DEFAULT FALSE,
@@ -115,7 +130,8 @@ VidPipeline/
 │  │  ├─ azure_blob.py
 │  │  ├─ celery_task.py
 │  │  ├─ ffmpeg_util.py
-│  │  └─ kafka.html
+│  │  ├─ virus_scan.py
+│  │  └─ kafka.py
 │  ├─ tasks/video_tasks.py
 │  ├─ models/
 │  ├─ schemas/

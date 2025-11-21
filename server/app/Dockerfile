@@ -2,11 +2,15 @@ FROM python:3.12.3-slim
 
 WORKDIR /app
 
-# System dependencies
+# System dependencies including ClamAV for virus scanning
 RUN apt-get update && \
     apt-get install -y build-essential && \
-    apt-get install -y ffmpeg libsm6 libxext6 &&\
+    apt-get install -y ffmpeg libsm6 libxext6 && \
+    apt-get install -y clamav clamav-daemon && \
     rm -rf /var/lib/apt/lists/*
+
+# Update ClamAV virus definitions (freshclam)
+RUN freshclam || true
 
 COPY requirements.txt .
 

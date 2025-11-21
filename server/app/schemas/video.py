@@ -16,6 +16,14 @@ class VideoSchema(BaseModel):
     dash_url: str | None
     thumbnail_url: str | None
     azure_sas_token: str | None = None
+    
+    # Video metadata
+    width: int | None = None
+    height: int | None = None
+    duration: int | None = None
+    codec: str | None = None
+    actual_mime_type: str | None = None
+    
     created_at: datetime
     updated_at: datetime
 

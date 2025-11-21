@@ -2,6 +2,8 @@ from celery import Task
 import json
 import logging
 import asyncio
+import tempfile
+import os
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -10,6 +12,11 @@ logger = logging.getLogger(__name__)
 class VideoProcessingTask(Task):
     """Video processing task for Celery"""
     name = 'tasks.process_video'
+
+
+class PreprocessingTask(Task):
+    """Preprocessing task for compression and virus scanning"""
+    name = 'tasks.preprocess_video'
 
 
 async def run_ffmpeg_async(func, *args, **kwargs):
@@ -56,6 +63,195 @@ def create_process_video_task(celery_app):
             raise
     
     return process_video
+
+
+def create_preprocess_video_task(celery_app):
+    """Create preprocessing task for compression and virus scanning."""
+    
+    @celery_app.task(
+        base=PreprocessingTask,
+        bind=True,
+        name='tasks.preprocess_video',
+        max_retries=2,
+        default_retry_delay=120,
+        autoretry_for=(Exception,),
+        retry_backoff=True,
+        retry_backoff_max=600,
+        retry_jitter=True
+    )
+    def preprocess_video(self, message_data):
+        """Preprocess video: compress and virus scan before transcoding.
+        
+        Steps:
+        1. Download video from Azure
+        2. Run virus scan (ClamAV)
+        3. Compress video to reduce size
+        4. Upload compressed version back to Azure
+        5. Trigger video processing pipeline
+        
+        Args:
+            message_data: dict with video_hash and video_path
+        """
+        logger.info(f"Preprocessing video task: {message_data}")
+        
+        video_hash = message_data.get('video_hash')
+        input_path = message_data.get('video_path')
+        
+        if not video_hash or not input_path:
+            logger.error("Missing required fields 'video_hash' or 'video_path'")
+            raise ValueError("Missing required fields")
+        
+        async def _run_with_fresh_engine():
+            """Wrapper to ensure fresh database engine for each task."""
+            from core.database import engine
+            
+            # Dispose existing engine connections
+            await engine.dispose()
+            
+            try:
+                # Run preprocessing
+                result = await _async_preprocess_video(video_hash, input_path)
+                return result
+            finally:
+                # Clean up engine after task
+                await engine.dispose()
+        
+        try:
+            # Run the async preprocessing in a new event loop
+            result = asyncio.run(_run_with_fresh_engine())
+            return result
+        except Exception as e:
+            logger.exception(f"Preprocessing failed for {video_hash}: {e}")
+            # Re-raise to trigger Celery retry
+            raise
+    
+    return preprocess_video
+
+
+async def _async_preprocess_video(video_hash: str, video_path: str) -> dict:
+    """Async preprocessing workflow (matches pattern from _async_process_video)."""
+    from utils.azure_blob import download_video_blob, upload_file
+    from utils.ffmpeg_util import compress_video, extract_video_metadata
+    from utils.kafka import send_kafka_message
+    from utils.virus_scan import scan_file_for_viruses
+    from crud.video import update_video_details
+    from core.database import AsyncSessionLocal
+    
+    logger.info(f"Starting preprocessing for video {video_hash}")
+    
+    # Update status to preprocessing
+    async with AsyncSessionLocal() as db:
+        await update_video_details(video_hash, {"status": "preprocessing"}, db)
+    
+    temp_original = None
+    temp_compressed = None
+    
+    try:
+        # Step 1: Download video from Azure
+        logger.info(f"Downloading video from Azure: {video_path}")
+        temp_original = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
+        temp_original.close()
+        
+        download_video_blob(video_hash, temp_original.name)
+        logger.info(f"Downloaded to {temp_original.name}")
+        
+        # Step 2: Extract video metadata using ffprobe
+        logger.info("Extracting video metadata...")
+        
+        try:
+            metadata = extract_video_metadata(temp_original.name)
+            logger.info(f"Extracted metadata: {metadata}")
+            
+            # Update database with metadata
+            async with AsyncSessionLocal() as db:
+                await update_video_details(video_hash, {
+                    "width": metadata.get('width'),
+                    "height": metadata.get('height'),
+                    "duration": int(metadata.get('duration', 0)),
+                    "codec": metadata.get('codec'),
+                    "actual_mime_type": metadata.get('mime_type')
+                }, db)
+            
+        except Exception as e:
+            # Log warning but continue - metadata extraction is not critical
+            logger.warning(f"Failed to extract metadata for {video_hash}: {e}")
+        
+        # Step 3: Virus scan
+        logger.info("Running virus scan...")
+        scan_result = scan_file_for_viruses(temp_original.name)
+        
+        if not scan_result['clean']:
+            error_msg = f"Virus detected: {scan_result['threat']}"
+            logger.error(error_msg)
+            # Update status to failed with specific virus scan error
+            async with AsyncSessionLocal() as db:
+                await update_video_details(video_hash, {
+                    "status": "failed",
+                    "description": f"Virus scan failed: {error_msg}"
+                }, db)
+            # DO NOT send Kafka message - stop processing here
+            raise RuntimeError(error_msg)
+        
+        logger.info(f"Virus scan passed: {scan_result['scan_result']}")
+        
+        # Step 4: Compress video
+        logger.info("Compressing video...")
+        temp_compressed = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
+        temp_compressed.close()
+        
+        compression_stats = compress_video(
+            temp_original.name,
+            temp_compressed.name,
+            target_bitrate='2500k'  # Adjust based on quality needs
+        )
+        
+        logger.info(f"Compression complete: Saved {compression_stats['saved_mb']} MB "
+                   f"({compression_stats['compression_percent']}% reduction)")
+        
+        # Step 5: Upload compressed version back to Azure
+        logger.info("Uploading compressed video to Azure...")
+        compressed_blob_path = f"{video_hash}/source.mp4"
+        compressed_url = upload_file(video_hash, temp_compressed.name, compressed_blob_path)
+        
+        logger.info(f"Compressed video uploaded to {compressed_url}")
+        
+        # Step 6: Update video status to processing
+        async with AsyncSessionLocal() as db:
+            await update_video_details(video_hash, {"status": "processing"}, db)
+        
+        # Step 7: Send Kafka message to video_processing topic for transcoding
+        logger.info(f"Sending video {video_hash} to video_processing topic...")
+        
+        await send_kafka_message(
+            topic='video_processing',
+            message={
+                'video_hash': video_hash,
+                'video_path': compressed_blob_path
+            }
+        )
+        
+        logger.info(f"Successfully sent video {video_hash} to video_processing topic")
+        
+        return {
+            "status": "success",
+            "video_hash": video_hash,
+            "virus_scan": scan_result['scan_result'],
+            "compression": compression_stats,
+            "compressed_url": compressed_url
+        }
+        
+    except Exception as e:
+        logger.error(f"Preprocessing failed: {e}")
+        raise
+    finally:
+        # Cleanup temp files
+        if temp_original and os.path.exists(temp_original.name):
+            os.unlink(temp_original.name)
+            logger.info(f"Cleaned up temp original: {temp_original.name}")
+        
+        if temp_compressed and os.path.exists(temp_compressed.name):
+            os.unlink(temp_compressed.name)
+            logger.info(f"Cleaned up temp compressed: {temp_compressed.name}")
 
 
 def create_process_profile_task(celery_app):

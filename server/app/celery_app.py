@@ -15,6 +15,7 @@ celery_app = Celery(
 celery_app.conf.update(
     task_routes={
         'tasks.process_video': {'queue': 'video_processing'},
+        'tasks.preprocess_video': {'queue': 'preprocessing'},
     },
     task_serializer='json',
     accept_content=['json'],
@@ -39,14 +40,16 @@ celery_app.conf.update(
     result_backend_transport_options={'master_name': 'mymaster'},
 )
 
-# Import and register the task
-from tasks.video_tasks import create_process_video_task
+# Import and register the tasks
+from tasks.video_tasks import create_process_video_task, create_preprocess_video_task
 
-# Create and register the task
+# Create and register the tasks
 process_video = create_process_video_task(celery_app)
+preprocess_video = create_preprocess_video_task(celery_app)
 
-# Explicitly register the task with the app
+# Explicitly register the tasks with the app
 celery_app.register_task(process_video)
+celery_app.register_task(preprocess_video)
 
 # Register profile-specific task factory
 from tasks.video_tasks import create_process_profile_task

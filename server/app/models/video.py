@@ -17,6 +17,13 @@ class Video(Base):
     thumbnail_url = Column(String, unique=True, index=False, nullable=True)
     hls_master_url = Column(String, unique=True, index=False, nullable=True)
     
+    # Video metadata (extracted server-side via ffprobe)
+    width = Column(Integer, nullable=True)  # Video width in pixels
+    height = Column(Integer, nullable=True)  # Video height in pixels
+    duration = Column(Integer, nullable=True)  # Duration in seconds
+    codec = Column(String, nullable=True)  # Video codec (e.g., 'h264', 'vp9')
+    actual_mime_type = Column(String, nullable=True)  # Real MIME type from ffprobe
+    
     # Profile completion tracking
     profile_144p_done = Column(Boolean, default=False, nullable=False)
     profile_360p_done = Column(Boolean, default=False, nullable=False)
