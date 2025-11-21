@@ -4,7 +4,7 @@ Raw, practical, and intentionally engineered — a distributed video streaming p
 
 ## System Architecture
 
-![System Design](./Images&Videos/SystemDesign.png)
+![System Design](https://github.com/Kaushik-Shahare/VidPipeline/blob/main/Images&Videos/SystemDesign.png?raw=true)
 
 ## Overview
 
@@ -20,12 +20,12 @@ VidPipeline demonstrates a production-grade distributed video transcoding pipeli
 ## Key Features
 
 - **Video Preprocessing** - ClamAV virus scanning and H.264 compression before transcoding
-- **Parallel Profile Processing** - All resolutions transcode simultaneously  
-- **Fanout Pattern** - Kafka consumer groups enable true parallel consumption  
-- **Coordinated Completion** - Master playlist generated only when all profiles finish  
-- **Independent Scaling** - Scale workers per profile (more 1080p workers than 144p)  
-- **HLS-Only Output** - Optimized for modern adaptive streaming  
-- **Production Ready** - Grafana, Prometheus, Loki monitoring included  
+- **Parallel Profile Processing** - All resolutions transcode simultaneously
+- **Fanout Pattern** - Kafka consumer groups enable true parallel consumption
+- **Coordinated Completion** - Master playlist generated only when all profiles finish
+- **Independent Scaling** - Scale workers per profile (more 1080p workers than 144p)
+- **HLS-Only Output** - Optimized for modern adaptive streaming
+- **Production Ready** - Grafana, Prometheus, Loki monitoring included
 
 **Message Flow**
 
@@ -90,14 +90,14 @@ CREATE TABLE videos (
     video_hash VARCHAR UNIQUE,
     title VARCHAR,
     status VARCHAR,  -- 'uploading', 'preprocessing', 'processing', 'completed', 'failed'
-    
+
     -- Video metadata (extracted during preprocessing)
     width INTEGER,
     height INTEGER,
     duration INTEGER,
     codec VARCHAR,
     actual_mime_type VARCHAR,
-    
+
     -- Profile completion tracking
     profile_144p_done BOOLEAN DEFAULT FALSE,
     profile_360p_done BOOLEAN DEFAULT FALSE,
@@ -105,11 +105,11 @@ CREATE TABLE videos (
     profile_720p_done BOOLEAN DEFAULT FALSE,
     profile_1080p_done BOOLEAN DEFAULT FALSE,
     thumbnail_done BOOLEAN DEFAULT FALSE,
-    
+
     -- URLs
     hls_master_url VARCHAR,
     thumbnail_url VARCHAR,
-    
+
     created_at TIMESTAMP,
     updated_at TIMESTAMP
 );
@@ -217,6 +217,7 @@ docker exec -it kafka kafka-consumer-groups \
 ```
 
 You should see:
+
 - `video_processing_144p`
 - `video_processing_360p`
 - `video_processing_480p`
@@ -343,6 +344,7 @@ uvicorn main:app --reload --port 8000
 ## Upload and Process a Video
 
 1. **Upload video chunks** via `client/index.html` or API:
+
    ```bash
    curl -X POST http://localhost:8000/videos/upload \
      -F "file=@video.mp4" \
@@ -351,11 +353,13 @@ uvicorn main:app --reload --port 8000
    ```
 
 2. **Finalize upload** to trigger processing:
+
    ```bash
    curl -X POST http://localhost:8000/videos/finalize/{video_hash}
    ```
 
 3. **Processing begins automatically:**
+
    - Message sent to Kafka topic `video_processing`
    - All 6 consumer groups receive the message (fanout)
    - Each profile transcodes in parallel
@@ -363,6 +367,7 @@ uvicorn main:app --reload --port 8000
    - Last profile generates `master.m3u8`
 
 4. **Monitor progress:**
+
    - Kafka UI: http://localhost:8081 (consumer lag)
    - Flower: http://localhost:5555 (Celery tasks)
    - Database: Query `profile_*_done` columns
@@ -440,7 +445,7 @@ docker exec -it kafka kafka-consumer-groups \
 Check which profiles are completed:
 
 ```sql
-SELECT 
+SELECT
     video_hash,
     status,
     profile_144p_done,
@@ -481,6 +486,7 @@ Access pre-configured dashboards at http://localhost:3001:
 **Symptoms:** One or more profiles stuck in processing
 
 **Debug steps:**
+
 1. Check consumer logs: `docker logs consumer_360p`
 2. Check worker logs: `docker logs worker_360p`
 3. Verify Celery queue has tasks: `redis-cli LLEN video_processing_360p`
@@ -492,6 +498,7 @@ Access pre-configured dashboards at http://localhost:3001:
 **Symptoms:** All profiles done but no `master.m3u8`
 
 **Debug steps:**
+
 1. Query database - all 6 `profile_*_done` columns should be `TRUE`:
    ```sql
    SELECT * FROM videos WHERE video_hash = 'your_hash';
@@ -502,6 +509,7 @@ Access pre-configured dashboards at http://localhost:3001:
 ### Slow transcoding performance
 
 **Solutions:**
+
 1. Check CPU usage: `docker stats`
 2. Add more workers for slow profiles (720p, 1080p)
 3. Enable hardware acceleration (if available):
@@ -514,6 +522,7 @@ Access pre-configured dashboards at http://localhost:3001:
 **Symptoms:** Messages piling up in Kafka
 
 **Solutions:**
+
 1. Scale up consumers: `docker compose up -d --scale consumer_360p=3`
 2. Scale up workers: `docker compose up -d --scale worker_360p=3`
 3. Check if workers are stuck or erroring
@@ -526,6 +535,7 @@ Access pre-configured dashboards at http://localhost:3001:
 ### FFmpeg Errors
 
 **Common issues:**
+
 - File paths incorrect → Check upload directory exists
 - Permissions issue → Ensure worker can write to `media/uploads/`
 - macOS hardware acceleration not supported → Falls back to `libx264` automatically
@@ -534,6 +544,7 @@ Access pre-configured dashboards at http://localhost:3001:
 ### Kafka Not Receiving Messages
 
 **Debug steps:**
+
 1. Verify topic exists:
    ```bash
    docker exec -it kafka kafka-topics --list --bootstrap-server kafka:29092
@@ -541,13 +552,14 @@ Access pre-configured dashboards at http://localhost:3001:
 2. Check producer logs in FastAPI backend
 3. Verify `KAFKA_BOOTSTRAP_SERVERS` matches in all services
 
-2. Check worker is connected: Look for "Connected to redis://..." in worker logs
-3. Ensure queue names match between consumer and worker
-4. Test Redis connection: `redis-cli -h localhost ping`
+4. Check worker is connected: Look for "Connected to redis://..." in worker logs
+5. Ensure queue names match between consumer and worker
+6. Test Redis connection: `redis-cli -h localhost ping`
 
 ### HLS Playback Issues
 
 **Common causes:**
+
 - Must be served over HTTP, not `file://`
 - Check CORS headers in FastAPI
 - Verify MIME types: `.m3u8` → `application/vnd.apple.mpegurl`
@@ -575,13 +587,15 @@ Access pre-configured dashboards at http://localhost:3001:
 Built to demonstrate real-world distributed system patterns without enterprise overhead. Perfect for learning, portfolios, and interviews.
 
 **Key Technologies:**
+
 - Apache Kafka (fanout messaging)
-- Celery (distributed task queue)  
+- Celery (distributed task queue)
 - FFmpeg (video transcoding)
 - FastAPI (async Python web framework)
 - Redis (message broker & cache)
 
 **Architecture Patterns:**
+
 - Fanout messaging with consumer groups
 - Pub/Sub model
 - Database-coordinated completion
