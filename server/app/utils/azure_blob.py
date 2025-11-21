@@ -4,7 +4,7 @@ import os
 from functools import lru_cache
 from typing import Dict, List
 
-from azure.core.exceptions import AzureError, ResourceExistsError
+from azure.core.exceptions import AzureError, ResourceExistsError, ResourceNotFoundError
 from azure.storage.blob import BlobServiceClient, ContentSettings
 from azure.storage.blob import (
     generate_container_sas,
@@ -36,13 +36,22 @@ def _container_name() -> str:
 def _base_url() -> str:
     return os.getenv("AZURE_STORAGE_URL", "")
 
+from azure.core.exceptions import ResourceExistsError, HttpResponseError
 
+@lru_cache(maxsize=1)
 def _container_client():
     client = _blob_service_client().get_container_client(_container_name())
     try:
         client.create_container()
     except ResourceExistsError:
         pass
+    except HttpResponseError as exc:
+        # 409 means already exists — ignore; otherwise re-raise or log
+        if getattr(exc, "status_code", None) == 409:
+            pass
+        else:
+            logging.getLogger(__name__).exception("Failed creating container")
+            raise
     return client
 
 
@@ -247,7 +256,7 @@ def ensure_blob_cors() -> None:
 
     cors_rule = CorsRule(
         allowed_origins=allowed_origins,
-        allowed_methods=["GET","HEAD","OPTIONS"],
+        allowed_methods=["GET","HEAD","OPTIONS","PUT"],
         allowed_headers="*",
         exposed_headers="*",
         max_age_in_seconds=3600,
@@ -277,3 +286,263 @@ def ensure_blob_cors() -> None:
         logging.getLogger(__name__).warning(
             "Unable to configure Azure Blob CORS: %s", exc
         )
+
+
+def generate_block_upload_sas(video_hash: str, chunk_index: int, minutes_valid: int = 30) -> str:
+    """Generate a presigned URL for uploading a specific block/chunk directly to Azure Blob.
+    
+    This enables client-side direct uploads without data passing through the backend.
+    The URL grants write-only permission for a specific block ID.
+    """
+    from azure.storage.blob import generate_blob_sas, BlobSasPermissions
+    from urllib.parse import quote
+    
+    ensure_blob_cors()
+    parts = _parse_conn_string()
+    account = parts.get("AccountName")
+    key = parts.get("AccountKey")
+    if not account or not key:
+        raise RuntimeError("Invalid Azure connection string: missing AccountName/AccountKey")
+    
+    blob_name = _blob_name(video_hash)
+    block_id = _block_id(chunk_index)
+    
+    # Generate SAS token with ALL necessary permissions for block operations
+    # add=True is required for PutBlock (staging blocks)
+    # write=True is required for PutBlockList (committing blocks)
+    # create=True allows creating the blob if it doesn't exist
+    sas_token = generate_blob_sas(
+        account_name=account,
+        container_name=_container_name(),
+        blob_name=blob_name,
+        account_key=key,
+        permission=BlobSasPermissions(read=False, add=True, create=True, write=True),
+        expiry=datetime.datetime.utcnow() + datetime.timedelta(minutes=minutes_valid),
+    )
+    
+    # Build the presigned URL with URL-encoded block_id parameter
+    base_url = _full_blob_url(blob_name)
+    # URL encode the block_id to handle special characters in base64
+    encoded_block_id = quote(block_id, safe='')
+    return f"{base_url}?comp=block&blockid={encoded_block_id}&{sas_token}"
+
+
+def verify_block_staged(video_hash: str, chunk_index: int) -> bool:
+    """Verify if a specific block has been successfully staged."""
+    try:
+        blob_client = _container_client().get_blob_client(_blob_name(video_hash))
+        # Get uncommitted blocks
+        block_list_result = blob_client.get_block_list(block_list_type="uncommitted")
+        
+        # Azure SDK returns tuple: (committed_blocks, uncommitted_blocks)
+        if isinstance(block_list_result, tuple):
+            _, uncommitted = block_list_result
+        else:
+            uncommitted = getattr(block_list_result, 'uncommitted_blocks', [])
+        
+        expected_block_id = _block_id(chunk_index)
+        return any(block.id == expected_block_id for block in uncommitted)
+    except AzureError:
+        return False
+
+
+def get_staged_chunks(video_hash: str) -> list[int]:
+    """Get list of chunk indices that have been successfully staged.
+    
+    Returns:
+        List of chunk indices (e.g., [0, 1, 2, 5, 7])
+    """
+    import time
+    
+    max_retries = 3
+    retry_delay = 0.5
+    
+    for attempt in range(max_retries):
+        try:
+            blob_client = _container_client().get_blob_client(_blob_name(video_hash))
+            
+            # Check if blob exists before getting block list
+            try:
+                block_list_result = blob_client.get_block_list(block_list_type="uncommitted")
+            except ResourceNotFoundError:
+                return []
+            except AzureError as e:
+                # Blob doesn't exist yet (no chunks uploaded) - return empty list
+                error_code = getattr(e, 'error_code', None)
+                if error_code == 'BlobNotFound':
+                    return []
+                # For other errors, raise to trigger retry
+                raise
+            
+            # Azure SDK returns tuple: (committed_blocks, uncommitted_blocks)
+            # We only care about uncommitted blocks (chunks not yet finalized)
+            if isinstance(block_list_result, tuple):
+                _, uncommitted = block_list_result
+            else:
+                uncommitted = getattr(block_list_result, 'uncommitted_blocks', [])
+            
+            # Extract chunk indices from block IDs
+            staged_indices = []
+            for block in uncommitted:
+                try:
+                    # Decode base64 block_id back to chunk index
+                    decoded = base64.b64decode(block.id).decode()
+                    chunk_index = int(decoded)
+                    staged_indices.append(chunk_index)
+                except (ValueError, UnicodeDecodeError):
+                    continue
+            
+            return sorted(staged_indices)
+            
+        except AzureError as e:
+            if attempt < max_retries - 1:
+                # Exponential backoff
+                time.sleep(retry_delay * (2 ** attempt))
+                continue
+            # Last attempt failed, return empty list rather than crash
+            logging.getLogger(__name__).warning(
+                f"Failed to get staged chunks for {video_hash} after {max_retries} attempts: {e}"
+            )
+            return []
+    
+    return []
+
+
+def get_uploaded_chunks(video_hash: str) -> list[int]:
+    """Get list of chunk indices that have already been uploaded to Azure.
+    
+    This enables resumable uploads - client can skip already-uploaded chunks.
+    
+    Args:
+        video_hash: Unique identifier for the video
+    
+    Returns:
+        Sorted list of chunk indices (e.g., [0, 1, 2, 5, 7])
+    """
+    container_client = _container_client()
+    prefix = f"{video_hash}/chunk_"
+    
+    try:
+        # List all blobs with the chunk prefix
+        blobs = container_client.list_blobs(name_starts_with=prefix)
+        uploaded_indices = []
+        
+        for blob in blobs:
+            # Extract chunk index from blob name: {video_hash}/chunk_{index}
+            blob_name = blob.name
+            if blob_name.startswith(prefix):
+                try:
+                    chunk_index = int(blob_name[len(prefix):])
+                    uploaded_indices.append(chunk_index)
+                except ValueError:
+                    # Skip blobs that don't match the pattern
+                    continue
+        
+        return sorted(uploaded_indices)
+    except AzureError as e:
+        logging.getLogger(__name__).warning(
+            f"Failed to list uploaded chunks for {video_hash}: {e}"
+        )
+        return []
+
+
+async def upload_chunk_to_azure(video_hash: str, chunk_index: int, chunk_bytes: bytes) -> str:
+    """Upload a video chunk as a separate blob in Azure Storage.
+    
+    Chunks are stored under: {video_hash}/chunk_{chunk_index}
+    This allows for independent chunk uploads without block staging complexity.
+    
+    Args:
+        video_hash: Unique identifier for the video
+        chunk_index: Index of this chunk (0-based)
+        chunk_bytes: Raw chunk data
+    
+    Returns:
+        Blob path where chunk was stored
+    """
+    blob_path = f"{video_hash}/chunk_{chunk_index}"
+    blob_client = _container_client().get_blob_client(blob_path)
+    
+    try:
+        blob_client.upload_blob(
+            chunk_bytes,
+            overwrite=True,
+            content_settings=ContentSettings(content_type="application/octet-stream")
+        )
+    except AzureError as exc:
+        raise RuntimeError(f"Failed to upload chunk {chunk_index} to Azure: {str(exc)}") from exc
+    
+    return blob_path
+
+
+async def merge_chunks_to_source(video_hash: str, total_chunks: int) -> str:
+    """Merge all uploaded chunks into a single source.mp4 file.
+    
+    Downloads all chunks, concatenates them in order, and uploads the result
+    as {video_hash}/source.mp4.
+    
+    Args:
+        video_hash: Unique identifier for the video
+        total_chunks: Total number of chunks to merge
+    
+    Returns:
+        URL of the merged source.mp4 blob
+    """
+    import tempfile
+    import os
+    
+    container_client = _container_client()
+    source_blob_path = f"{video_hash}/source.mp4"
+    
+    # Create a temporary file to write merged content
+    with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix='.mp4') as temp_file:
+        temp_path = temp_file.name
+        
+        try:
+            # Download and concatenate all chunks in order
+            for chunk_index in range(total_chunks):
+                chunk_blob_path = f"{video_hash}/chunk_{chunk_index}"
+                chunk_blob_client = container_client.get_blob_client(chunk_blob_path)
+                
+                try:
+                    # Download chunk data
+                    chunk_data = chunk_blob_client.download_blob().readall()
+                    temp_file.write(chunk_data)
+                except ResourceNotFoundError:
+                    raise RuntimeError(f"Chunk {chunk_index} not found in Azure. Upload may have failed.")
+                except AzureError as exc:
+                    raise RuntimeError(f"Failed to download chunk {chunk_index}: {str(exc)}") from exc
+            
+            # Close the temp file before uploading
+            temp_file.close()
+            
+            # Upload merged file as source.mp4
+            source_blob_client = container_client.get_blob_client(source_blob_path)
+            with open(temp_path, 'rb') as merged_file:
+                source_blob_client.upload_blob(
+                    merged_file,
+                    overwrite=True,
+                    content_settings=ContentSettings(content_type="video/mp4")
+                )
+            
+            # Clean up chunks after successful merge
+            for chunk_index in range(total_chunks):
+                chunk_blob_path = f"{video_hash}/chunk_{chunk_index}"
+                try:
+                    container_client.get_blob_client(chunk_blob_path).delete_blob()
+                except Exception as e:
+                    # Log but don't fail if cleanup fails
+                    logging.getLogger(__name__).warning(
+                        f"Failed to delete chunk {chunk_index} after merge: {e}"
+                    )
+            
+            # Return the URL
+            base_url = _base_url().rstrip("/")
+            if base_url:
+                return f"{base_url}/{source_blob_path}"
+            return source_blob_client.url
+            
+        finally:
+            # Always clean up temp file
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)

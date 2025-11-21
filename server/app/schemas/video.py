@@ -23,3 +23,5 @@ class VideoInitSchema(BaseModel):
     title: str = Field(..., example="Sample Video")
     description: str | None = Field(None, example="This is a sample video description.")
     total_chunks: int = Field(..., example=10)
+    file_size: int = Field(..., example=104857600, description="Total file size in bytes")
+    mime_type: str | None = Field(None, example="video/mp4", description="MIME type of the file")

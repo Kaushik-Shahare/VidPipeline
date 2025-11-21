@@ -1,7 +1,7 @@
 import logging
 import httpx
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from crud.video import (get_video_by_hash, create_video, get_all_videos)
@@ -9,11 +9,12 @@ from schemas.video import VideoSchema, VideoInitSchema
 from core.database import get_db
 from utils.kafka import send_video_processing_message
 from utils.azure_blob import (
-    stage_video_chunk,
-    commit_video_upload,
+    upload_chunk_to_azure,
+    merge_chunks_to_source,
     signed_url,
     blob_path_from_location,
     generate_container_sas_token,
+    get_uploaded_chunks,
 )
 
 router = APIRouter(prefix="/videos", tags=["videos"])
@@ -30,11 +31,56 @@ def generate_video_hash(title: str, total_chunks: int) -> str:
 
 @router.post("/init")
 async def init_video_upload(payload: VideoInitSchema, db: AsyncSession = Depends(get_db)) : 
+    """Initialize a video upload session with resumable upload support.
+    
+    Security checks:
+    - Validates file size limits (max 5GB)
+    - Validates file type by MIME type
+    - Generates unique video hash
+    
+    Resumable uploads:
+    - If video already exists and is in 'uploading' status, returns existing session
+    - Includes list of already uploaded chunks so client can resume
+    - Client only needs to upload missing chunks
+    """
+    # Validate file size (max 5GB)
+    MAX_FILE_SIZE = 5 * 1024 * 1024 * 1024  # 5GB
+    if payload.file_size > MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"File size {payload.file_size} exceeds maximum allowed size of {MAX_FILE_SIZE} bytes"
+        )
+    
+    # Validate MIME type from client (will be verified again on finalize)
+    ALLOWED_VIDEO_TYPES = [
+        "video/mp4", "video/quicktime", "video/x-msvideo", 
+        "video/x-matroska", "video/webm", "video/mpeg"
+    ]
+    if payload.mime_type and payload.mime_type not in ALLOWED_VIDEO_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File type {payload.mime_type} not allowed. Accepted: {', '.join(ALLOWED_VIDEO_TYPES)}"
+        )
+    
     video_hash = generate_video_hash(payload.title, payload.total_chunks)
     
     # Check if video with the same hash already exists
     existing_video = await get_video_by_hash(db, video_hash)
     if existing_video:
+        # If video is still uploading, support resumable upload
+        if existing_video.status == "uploading":
+            # Get list of chunks already uploaded to Azure
+            uploaded_chunks = get_uploaded_chunks(video_hash)
+            missing_chunks = [i for i in range(existing_video.total_chunks) if i not in uploaded_chunks]
+            
+            return {
+                **VideoSchema.model_validate(existing_video).model_dump(),
+                "resumable": True,
+                "uploaded_chunks": uploaded_chunks,
+                "missing_chunks": missing_chunks
+            }
+        
+        # If video is already processing or completed, return it as-is
         return existing_video
 
     # Create a new Video entry in the database
@@ -50,57 +96,96 @@ async def init_video_upload(payload: VideoInitSchema, db: AsyncSession = Depends
     if not new_video:
         raise HTTPException(status_code=500, detail="Failed to initialize video upload")
 
-    return new_video
+    return {
+        **VideoSchema.model_validate(new_video).model_dump(),
+        "resumable": False,
+        "uploaded_chunks": [],
+        "missing_chunks": list(range(new_video.total_chunks))
+    }
 
 
 @router.post("/upload_chunk/{video_hash}/{chunk_index}")
-async def upload_video_chunk(video_hash: str, chunk_index: int, chunk_data: UploadFile, db: AsyncSession = Depends(get_db)):
-    # Check the video hash
+async def upload_chunk(
+    video_hash: str,
+    chunk_index: int,
+    chunk: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db)
+):
+    """Upload a video chunk to Azure Blob Storage.
+    
+    Chunks are stored under video_hash/chunk_{chunk_index} in Azure.
+    After all chunks are uploaded, they will be merged into source.mp4.
+    """
+    # Verify video exists and is in uploading status
     video = await get_video_by_hash(db, video_hash)
-    if not video: 
+    if not video:
         raise HTTPException(status_code=404, detail="Video not found")
-
-    # Check if chunk index is valid and not already received
+    
+    if video.status != "uploading":
+        raise HTTPException(status_code=400, detail=f"Video is in {video.status} status, cannot upload chunks")
+    
+    # Validate chunk index
     if chunk_index < 0 or chunk_index >= video.total_chunks:
-        raise HTTPException(status_code=400, detail="Invalid chunk index")
-
-    chunk_bytes = await chunk_data.read()
+        raise HTTPException(
+            status_code=400,
+            detail=f"Chunk index {chunk_index} out of range [0, {video.total_chunks-1}]"
+        )
+    
+    # Read chunk data
+    chunk_bytes = await chunk.read()
     if not chunk_bytes:
-        raise HTTPException(status_code=400, detail="Chunk data is empty")
-
+        raise HTTPException(status_code=400, detail="Empty chunk data")
+    
+    # Upload chunk to Azure
     try:
-        stage_video_chunk(video_hash, chunk_index, chunk_bytes)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-    # Update received chunks count
+        await upload_chunk_to_azure(video_hash, chunk_index, chunk_bytes)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to upload chunk to Azure: {str(e)}")
+    
+    # Update received_chunks count
     video.received_chunks += 1
     await db.commit()
     await db.refresh(video)
-
-    # forced delay
-    # import asyncio
-    # await asyncio.sleep(1)
-
-    return {"message": f"Chunk {chunk_index} uploaded successfully", "video_hash": video_hash, "received_chunks": video.received_chunks}
+    
+    return {
+        "video_hash": video_hash,
+        "chunk_index": chunk_index,
+        "chunk_size": len(chunk_bytes),
+        "received_chunks": video.received_chunks,
+        "total_chunks": video.total_chunks
+    }
 
 @router.post("/finalize/{video_hash}")
 async def upload_video_finalize(video_hash: str, db: AsyncSession = Depends(get_db)):
+    """Finalize video upload by merging all chunks into source.mp4 and starting processing.
+    
+    This endpoint:
+    1. Verifies all chunks have been uploaded
+    2. Merges chunks into source.mp4 in Azure
+    3. Updates video status to 'processing'
+    4. Triggers Kafka fanout for transcoding
+    """
     # Check the video hash
     video = await get_video_by_hash(db, video_hash)
     if not video: 
         raise HTTPException(status_code=404, detail="Video not found")
 
     # Video already processing or completed
-    if video.status != "uploading": raise HTTPException(status_code=400, detail="Video upload already finalized or in processing")
+    if video.status != "uploading": 
+        raise HTTPException(status_code=400, detail="Video upload already finalized or in processing")
 
     # Ensure all chunks have been received
     if video.received_chunks != video.total_chunks:
-        raise HTTPException(status_code=400, detail="Not all chunks have been uploaded")
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Not all chunks have been uploaded. Received: {video.received_chunks}/{video.total_chunks}"
+        )
 
+    # Merge all chunks into source.mp4
     try:
-        blob_url = commit_video_upload(video_hash, video.total_chunks)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        blob_url = await merge_chunks_to_source(video_hash, video.total_chunks)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to merge chunks: {str(e)}")
 
     # Update video status and URL
     video.status = "processing"
@@ -111,7 +196,11 @@ async def upload_video_finalize(video_hash: str, db: AsyncSession = Depends(get_
     # Trigger async processing via Kafka (non-blocking)
     await send_video_processing_message(video_hash, f"{video_hash}/source.mp4")
     
-    return {"message": "Video upload finalized and processing started", "video_hash": video_hash, "video_url": video.url}
+    return {
+        "message": "Video upload finalized and processing started", 
+        "video_hash": video_hash, 
+        "video_url": video.url
+    }
 
 
 @router.get("", response_model=list[VideoSchema])
@@ -120,7 +209,7 @@ async def list_videos(db: AsyncSession = Depends(get_db)):
     signed_videos: list[VideoSchema] = []
 
     for video in videos:
-        video_data = VideoSchema.from_orm(video).dict()
+        video_data = VideoSchema.model_validate(video).model_dump()
 
         # For HLS streaming, use the proxy endpoint instead of direct Azure URLs
         # This ensures SAS tokens are properly handled for all playlist/segment requests

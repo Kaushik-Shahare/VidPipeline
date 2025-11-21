@@ -345,6 +345,16 @@
           return;
         }
 
+        // Validate file type by content, not extension
+        const validVideoTypes = [
+          "video/mp4", "video/quicktime", "video/x-msvideo",
+          "video/x-matroska", "video/webm", "video/mpeg"
+        ];
+        if (!validVideoTypes.includes(file.type)) {
+          alert(`Invalid file type: ${file.type}. Please upload a video file.`);
+          return;
+        }
+
         const CHUNK_SIZE = 2 * 1024 * 1024; // 2MB per chunk
         const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
         const videoTitle = file.name;
@@ -353,43 +363,140 @@
         const progressText = document.getElementById("progressText");
         const resultDiv = document.getElementById("result");
 
-        const initResp = await fetch(`${BACKEND_URL}/videos/init`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            title: videoTitle,
-            total_chunks: totalChunks,
-          }),
-        });
-        const initData = await initResp.json();
-        const videoHash = initData.video_hash;
-
-        for (let i = 0; i < totalChunks; i++) {
-          const start = i * CHUNK_SIZE;
-          const end = Math.min(file.size, start + CHUNK_SIZE);
-          const chunk = file.slice(start, end);
-          const formData = new FormData();
-          formData.append("chunk_data", chunk);
-          await fetch(`${BACKEND_URL}/videos/upload_chunk/${videoHash}/${i}`, {
+        try {
+          // Initialize upload with file metadata
+          const initResp = await fetch(`${BACKEND_URL}/videos/init`, {
             method: "POST",
-            body: formData,
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              title: videoTitle,
+              total_chunks: totalChunks,
+              file_size: file.size,
+              mime_type: file.type
+            }),
           });
-          const percent = Math.round(((i + 1) / totalChunks) * 100);
-          progressBar.value = percent;
-          progressText.innerText = ` Uploaded ${i + 1}/${totalChunks} (${percent}%)`;
+
+          if (!initResp.ok) {
+            const error = await initResp.json();
+            throw new Error(error.detail || "Failed to initialize upload");
+          }
+
+          const initData = await initResp.json();
+          const videoHash = initData.video_hash;
+
+          // Determine which chunks to upload (support resumable uploads)
+          let chunksToUpload = [];
+          let uploadedCount = 0;
+          
+          if (initData.resumable && initData.uploaded_chunks && initData.uploaded_chunks.length > 0) {
+            // Resume upload - only upload missing chunks
+            chunksToUpload = initData.missing_chunks || [];
+            uploadedCount = initData.uploaded_chunks.length;
+            progressText.innerText = `Resuming upload - ${uploadedCount}/${totalChunks} chunks already uploaded`;
+            progressBar.value = Math.round((uploadedCount / totalChunks) * 100);
+            console.log(`Resuming: ${uploadedCount} chunks already uploaded, ${chunksToUpload.length} remaining`);
+          } else {
+            // Fresh upload - upload all chunks
+            chunksToUpload = Array.from({ length: totalChunks }, (_, i) => i);
+            console.log(`Starting fresh upload of ${totalChunks} chunks`);
+          }
+
+          // Upload chunks with retry logic
+          const MAX_RETRIES = 3;
+          const failedChunks = [];
+
+          for (const i of chunksToUpload) {
+            const start = i * CHUNK_SIZE;
+            const end = Math.min(file.size, start + CHUNK_SIZE);
+            const chunk = file.slice(start, end);
+
+            let uploadSuccess = false;
+            let lastError = null;
+
+            // Retry logic for individual chunk
+            for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+              try {
+                // Create FormData to send chunk to backend
+                const formData = new FormData();
+                formData.append('chunk', chunk);
+
+                // Upload chunk to backend
+                const uploadResp = await fetch(
+                  `${BACKEND_URL}/videos/upload_chunk/${videoHash}/${i}`,
+                  {
+                    method: "POST",
+                    body: formData,
+                  }
+                );
+
+                if (!uploadResp.ok) {
+                  const errorData = await uploadResp.json();
+                  throw new Error(errorData.detail || 'Upload failed');
+                }
+
+                const uploadData = await uploadResp.json();
+                console.log(`Chunk ${i} uploaded successfully (attempt ${attempt + 1}/${MAX_RETRIES})`);
+                uploadSuccess = true;
+                break; // Success, exit retry loop
+
+              } catch (error) {
+                lastError = error;
+                console.warn(`Chunk ${i} upload attempt ${attempt + 1}/${MAX_RETRIES} failed:`, error.message);
+                
+                if (attempt < MAX_RETRIES - 1) {
+                  // Exponential backoff: 1s, 2s, 4s
+                  const delay = Math.pow(2, attempt) * 1000;
+                  console.log(`Retrying chunk ${i} in ${delay}ms...`);
+                  await new Promise(resolve => setTimeout(resolve, delay));
+                }
+              }
+            }
+
+            if (!uploadSuccess) {
+              // All retries failed for this chunk
+              failedChunks.push(i);
+              console.error(`Chunk ${i} failed after ${MAX_RETRIES} attempts:`, lastError.message);
+              // Continue with other chunks instead of stopping
+            } else {
+              uploadedCount++;
+            }
+
+            // Update progress
+            const percent = Math.round((uploadedCount / totalChunks) * 100);
+            progressBar.value = percent;
+            progressText.innerText = `Uploaded ${uploadedCount}/${totalChunks} (${percent}%)`;
+          }
+
+          // Check if any chunks failed
+          if (failedChunks.length > 0) {
+            throw new Error(
+              `Failed to upload ${failedChunks.length} chunk(s): ${failedChunks.slice(0, 5).join(', ')}${failedChunks.length > 5 ? '...' : ''}. ` +
+              `You can retry this upload to resume from where it failed.`
+            );
+          }
+
+          // Finalize upload
+          const finalizeResp = await fetch(
+            `${BACKEND_URL}/videos/finalize/${videoHash}`,
+            { method: "POST" },
+          );
+
+          if (!finalizeResp.ok) {
+            const finalizeError = await finalizeResp.json();
+            throw new Error(finalizeError.detail || "Failed to finalize upload");
+          }
+
+          const finalizeData = await finalizeResp.json();
+          resultDiv.innerHTML = `<strong>Processing started:</strong> <a href="./streaming.html?v=${encodeURIComponent(videoHash)}">Go to Watch Page</a>`;
+          progressText.innerText = "Upload completed!";
+          progressBar.value = 100;
+
+          // refresh list after a short delay to allow processing
+          setTimeout(fetchVideos, 2000);
+        } catch (error) {
+          resultDiv.innerHTML = `<strong style="color: var(--accent);">Error:</strong> ${error.message}`;
+          console.error("Upload error:", error);
         }
-
-        const finalizeResp = await fetch(
-          `${BACKEND_URL}/videos/finalize/${videoHash}`,
-          { method: "POST" },
-        );
-        const finalizeData = await finalizeResp.json();
-        resultDiv.innerHTML = `<strong>Processing started:</strong> <a href="./streaming.html?v=${encodeURIComponent(videoHash)}">Go to Watch Page</a>`;
-        progressText.innerText = "Upload completed!";
-        progressBar.value = 100;
-
-        // refresh list after a short delay to allow processing
-        setTimeout(fetchVideos, 2000);
       }
 
       fetchVideos();
