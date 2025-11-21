@@ -101,24 +101,9 @@ def create_preprocess_video_task(celery_app):
             logger.error("Missing required fields 'video_hash' or 'video_path'")
             raise ValueError("Missing required fields")
         
-        async def _run_with_fresh_engine():
-            """Wrapper to ensure fresh database engine for each task."""
-            from core.database import engine
-            
-            # Dispose existing engine connections
-            await engine.dispose()
-            
-            try:
-                # Run preprocessing
-                result = await _async_preprocess_video(video_hash, input_path)
-                return result
-            finally:
-                # Clean up engine after task
-                await engine.dispose()
-        
         try:
-            # Run the async preprocessing in a new event loop
-            result = asyncio.run(_run_with_fresh_engine())
+            # Run the async preprocessing in a new event loop (same pattern as process_video)
+            result = asyncio.run(_async_preprocess_video(video_hash, input_path))
             return result
         except Exception as e:
             logger.exception(f"Preprocessing failed for {video_hash}: {e}")
@@ -135,18 +120,30 @@ async def _async_preprocess_video(video_hash: str, video_path: str) -> dict:
     from utils.kafka import send_kafka_message
     from utils.virus_scan import scan_file_for_viruses
     from crud.video import update_video_details
-    from core.database import AsyncSessionLocal
+    from core.database import engine
+    from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+    from sqlalchemy.orm import sessionmaker
+    import os
     
     logger.info(f"Starting preprocessing for video {video_hash}")
     
-    # Update status to preprocessing
-    async with AsyncSessionLocal() as db:
-        await update_video_details(video_hash, {"status": "preprocessing"}, db)
+    # Create fresh engine and session for this event loop
+    DATABASE_URL = os.getenv("DATABASE_URL")
+    local_engine = create_async_engine(DATABASE_URL, echo=True)
+    LocalSessionLocal = sessionmaker(
+        bind=local_engine,
+        class_=AsyncSession,
+        expire_on_commit=False
+    )
     
     temp_original = None
     temp_compressed = None
     
     try:
+        # Update status to preprocessing
+        async with LocalSessionLocal() as db:
+            await update_video_details(video_hash, {"status": "preprocessing"}, db)
+    
         # Step 1: Download video from Azure
         logger.info(f"Downloading video from Azure: {video_path}")
         temp_original = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
@@ -163,7 +160,7 @@ async def _async_preprocess_video(video_hash: str, video_path: str) -> dict:
             logger.info(f"Extracted metadata: {metadata}")
             
             # Update database with metadata
-            async with AsyncSessionLocal() as db:
+            async with LocalSessionLocal() as db:
                 await update_video_details(video_hash, {
                     "width": metadata.get('width'),
                     "height": metadata.get('height'),
@@ -184,7 +181,7 @@ async def _async_preprocess_video(video_hash: str, video_path: str) -> dict:
             error_msg = f"Virus detected: {scan_result['threat']}"
             logger.error(error_msg)
             # Update status to failed with specific virus scan error
-            async with AsyncSessionLocal() as db:
+            async with LocalSessionLocal() as db:
                 await update_video_details(video_hash, {
                     "status": "failed",
                     "description": f"Virus scan failed: {error_msg}"
@@ -216,7 +213,7 @@ async def _async_preprocess_video(video_hash: str, video_path: str) -> dict:
         logger.info(f"Compressed video uploaded to {compressed_url}")
         
         # Step 6: Update video status to processing
-        async with AsyncSessionLocal() as db:
+        async with LocalSessionLocal() as db:
             await update_video_details(video_hash, {"status": "processing"}, db)
         
         # Step 7: Send Kafka message to video_processing topic for transcoding
@@ -252,6 +249,9 @@ async def _async_preprocess_video(video_hash: str, video_path: str) -> dict:
         if temp_compressed and os.path.exists(temp_compressed.name):
             os.unlink(temp_compressed.name)
             logger.info(f"Cleaned up temp compressed: {temp_compressed.name}")
+        
+        # Dispose engine
+        await local_engine.dispose()
 
 
 def create_process_profile_task(celery_app):

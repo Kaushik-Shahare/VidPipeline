@@ -188,11 +188,11 @@ def transcode_hls_profile(input_file, output_dir, profile: str):
     logging.info(f"Starting HLS transcoding for profile={profile} for {input_file} into {output_dir}")
 
     profiles = {
-        '144p': {'scale': '256:144', 'b:v': '200k', 'resolution': '256x144', 'preset': 'veryfast'},
-        '360p': {'scale': '640:360', 'b:v': '800k', 'resolution': '640x360', 'preset': 'veryfast'},
-        '480p': {'scale': '854:480', 'b:v': '1500k', 'resolution': '854x480', 'preset': 'fast'},
-        '720p': {'scale': '1280:720', 'b:v': '3000k', 'resolution': '1280x720', 'preset': 'fast'},
-        '1080p': {'scale': '1920:1080', 'b:v': '5000k', 'resolution': '1920x1080', 'preset': 'fast'},
+        '144p': {'scale': '256:144', 'b:v': '200k', 'resolution': '256x144', 'preset': 'ultrafast', 'fps': None},
+        '360p': {'scale': '640:360', 'b:v': '800k', 'resolution': '640x360', 'preset': 'ultrafast', 'fps': None},
+        '480p': {'scale': '854:480', 'b:v': '1200k', 'resolution': '854x480', 'preset': 'ultrafast', 'fps': None},
+        '720p': {'scale': '1280:720', 'b:v': '2000k', 'resolution': '1280x720', 'preset': 'ultrafast', 'fps': 30},
+        '1080p': {'scale': '1920:1080', 'b:v': '2500k', 'resolution': '1920x1080', 'preset': 'ultrafast', 'fps': 30},
     }
 
     if profile not in profiles:
@@ -208,28 +208,34 @@ def transcode_hls_profile(input_file, output_dir, profile: str):
     segment_pattern = os.path.join(profile_dir, 'segment_%03d.ts')
 
     try:
-        # Build ffmpeg command with optimized settings
+        # Build ffmpeg command with ARM-optimized settings
+        # Build video filter: scale + optional fps limit
+        vf_parts = [f"scale={info['scale']}"]
+        if info.get('fps'):
+            vf_parts.append(f"fps={info['fps']}")
+        vf_string = ','.join(vf_parts)
+        
+        output_options = {
+            'c:v': 'libx264',
+            'preset': info['preset'],
+            'b:v': info['b:v'],
+            'c:a': 'aac',
+            'b:a': '128k',
+            'threads': '0',
+            'movflags': '+faststart'
+        }
+        
         cmd = (
             ffmpeg
             .input(input_file)
             .output(
                 playlist_path,
-                vf=f"scale={info['scale']}",
+                vf=vf_string,
                 format='hls',
                 hls_time=6,
                 hls_playlist_type='vod',
                 hls_segment_filename=segment_pattern,
-                **{
-                    'c:v': 'libx264',
-                    'preset': info['preset'],
-                    'b:v': info['b:v'],
-                    'maxrate': info['b:v'],
-                    'bufsize': f"{int(info['b:v'][:-1]) * 2}k",
-                    'c:a': 'aac',
-                    'b:a': '128k',
-                    'threads': '0',
-                    'movflags': '+faststart'
-                }
+                **output_options
             )
             .overwrite_output()
             .compile()

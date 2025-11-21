@@ -29,9 +29,9 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,  # Only fetch one task at a time to avoid blocking
     worker_max_tasks_per_child=10,  # Restart worker after 10 tasks to prevent memory leaks
     
-    # Task execution limits
-    task_soft_time_limit=1800,  # 30 minutes soft limit (allows cleanup)
-    task_time_limit=2100,  # 35 minutes hard limit
+    # Task execution limits - increased for ARM/low-power systems
+    task_soft_time_limit=6600,  # 110 minutes soft limit (allows cleanup)
+    task_time_limit=7200,  # 120 minutes hard limit (2 hours for slow ARM transcoding)
     task_acks_late=True,  # Only acknowledge task after completion
     task_reject_on_worker_lost=True,  # Requeue task if worker dies
     
